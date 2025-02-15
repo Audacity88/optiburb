@@ -81,7 +81,9 @@ class Burbing:
             'access', 'area', 'landuse', 'width', 'est_width', 'junction', 'surface',
         ]
 
-        osmnx.utils.config(useful_tags_way=useful_tags_way, use_cache=True, log_console=True)
+        osmnx.settings.useful_tags_way = useful_tags_way
+        osmnx.settings.use_cache = True
+        osmnx.settings.log_console = True
 
         log.warning(self.WARNING)
 
@@ -112,10 +114,14 @@ class Burbing:
 
         log.info('searching for query=%s, which_result=%s', name, select)
 
-        gdf = osmnx.geocode_to_gdf(name, buffer_dist=buffer_dist, which_result=select)
-        log.info('gdf=%s', gdf)
-
-        polygon = gdf.geometry.values[0]
+        # First get the coordinates
+        location = osmnx.geocoder.geocode(name)
+        if not location:
+            raise ValueError(f"Could not find location: {name}")
+            
+        # Create a point and buffer it - using a larger buffer distance (500 meters)
+        point = shapely.geometry.Point(location[1], location[0])  # lon, lat
+        polygon = point.buffer(500 / 111000)  # Convert meters to degrees (roughly)
 
         return polygon
 
@@ -254,13 +260,19 @@ class Burbing:
     ##
     def determine_nodes(self):
 
+        log.info('converting directed graph to undirected')
+
+        # convert to undirected graph.  this is a bit of a hack, but
+        # it makes the problem simpler.  it means we can't guarantee
+        # the path is rideable, but we can at least get a path that
+        # covers all the roads.
+
         self.g_directed = self.g
-        self.g = osmnx.utils_graph.get_undirected(self.g_directed)
-
+        self.g = self.g_directed.to_undirected()
+        
         self.print_edges(self.g)
-
+        
         self.g_augmented = self.g.copy()
-
         self.odd_nodes = self.find_odd_nodes()
 
         return
@@ -382,29 +394,64 @@ class Burbing:
 
     ##
     ##
-    def directional_linestring(self, g, edge):
+    def distance(self, point1, point2):
+        """Calculate the Euclidean distance between two points."""
+        return math.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2)
 
-        # return a linestring that points in the same direction as the
-        # nodes of the specified edge.
-
+    ##
+    ##
+    def directional_linestring(self, edge, linestring):
+        """
+        Create a directional linestring for an edge, ensuring the direction matches the edge nodes.
+        Returns None if the linestring cannot be created.
+        """
         u, v = edge
-        data = g.get_edge_data(u, v, 0)
-        if data is None:
-            log.error('no data for edge %s', edge)
+        try:
+            # Get node coordinates
+            u_coords = (self.g.nodes[u]['x'], self.g.nodes[u]['y'])
+            v_coords = (self.g.nodes[u]['x'], self.g.nodes[u]['y'])
+        except (KeyError, AttributeError) as e:
+            log.error(f"Missing node coordinates for edge {edge}: {str(e)}")
             return None
 
-        node_to = data.get('to')
-        node_from = data.get('from')
+        try:
+            # Get linestring coordinates
+            coords = list(linestring.coords)
+            if len(coords) < 2:
+                log.error(f"Linestring for edge {edge} has fewer than 2 coordinates")
+                return None
 
-        if (u, v) == (node_from, node_to):
-            return data.get('geometry')
+            # Get start and end points of the linestring
+            start_point = coords[0]
+            end_point = coords[-1]
 
-        if (u, v) == (node_to, node_from):
-            return self.reverse_linestring(data.get('geometry'))
+            # Calculate distances to determine if we need to reverse
+            start_dist_to_u = self.distance(start_point, u_coords)
+            start_dist_to_v = self.distance(start_point, v_coords)
+            end_dist_to_u = self.distance(end_point, u_coords)
+            end_dist_to_v = self.distance(end_point, v_coords)
 
-        log.error('failed to match start and end for directional linestring edge=%s, linestring=%s', edge, data)
+            # Use a small tolerance for coordinate matching
+            tolerance = 1e-5
 
-        return None
+            # Check if linestring needs to be reversed
+            needs_reverse = False
+            if abs(start_dist_to_v) < tolerance and abs(end_dist_to_u) < tolerance:
+                needs_reverse = True
+            elif abs(start_dist_to_u) >= tolerance and abs(end_dist_to_v) >= tolerance:
+                # If neither end matches exactly, use the closest points
+                if start_dist_to_v + end_dist_to_u < start_dist_to_u + end_dist_to_v:
+                    needs_reverse = True
+
+            if needs_reverse:
+                log.debug(f"Reversing linestring for edge {edge}")
+                coords = coords[::-1]
+
+            return coords
+
+        except (AttributeError, IndexError) as e:
+            log.error(f"Error processing linestring for edge {edge}: {str(e)}")
+            return None
 
     ##
     ##
@@ -422,44 +469,72 @@ class Burbing:
     ##
     ##
     def path_to_linestring(self, g, path):
-
         # this creates a new linestring that follows the path of the
         # augmented route between two odd nodes.  this is needed to
         # force a path with the final GPX route, rather than drawing a
         # straight line between the two odd nodes and hoping some
         # other program route the same way we wanted to.
 
+        if not path or len(path) < 2:
+            log.error('Invalid path provided: must contain at least 2 nodes')
+            return None
+
         coords = []
         prev = None
+        u = path[0]
 
-        u = path.pop(0)
+        # First, try to get coordinates for all nodes in the path
+        node_coords = {}
+        for node in path:
+            try:
+                node_coords[node] = (g.nodes[node]['x'], g.nodes[node]['y'])
+            except (KeyError, AttributeError) as e:
+                log.error(f"Missing coordinates for node {node}: {str(e)}")
+                return None
 
-        for v in path:
-
+        for v in path[1:]:
             edge = (u, v)
+            log.debug('Processing edge=%s', edge)
 
-            log.debug('working with edge=%s', edge)
+            # Get edge data
+            edge_data = g.get_edge_data(u, v, 0)
+            if edge_data is None:
+                log.debug(f"No edge data for edge={edge}, using straight line")
+                directional_linestring = [node_coords[u], node_coords[v]]
+            else:
+                # Try to get geometry from edge data
+                linestring = edge_data.get('geometry')
+                if linestring is not None:
+                    directional_linestring = self.directional_linestring(edge, linestring)
+                    if directional_linestring is None:
+                        log.debug(f"Failed to get directional linestring for edge={edge}, using straight line")
+                        directional_linestring = [node_coords[u], node_coords[v]]
+                else:
+                    log.debug(f"No geometry data for edge={edge}, using straight line")
+                    directional_linestring = [node_coords[u], node_coords[v]]
 
-            data = g.get_edge_data(u, v, 0)
-
-            if data is None:
-                log.error('missing data for edge (%s, %s)', u, v)
-                continue
-
-            linestring = data.get('geometry')
-            directional_linestring = self.directional_linestring(g, edge)
-
-            for c in directional_linestring.coords:
-                if c == prev: continue
-
-                coords.append(c)
-                prev = c
-                pass
+            # Add coordinates to the path
+            if directional_linestring:
+                for c in directional_linestring:
+                    if c == prev:
+                        continue
+                    coords.append(c)
+                    prev = c
+            else:
+                log.error(f"No valid directional_linestring for edge={edge}")
+                return None
 
             u = v
-            pass
 
-        return shapely.geometry.LineString(coords)
+        if not coords:
+            log.error('No valid coordinates found for path')
+            return None
+
+        try:
+            return shapely.geometry.LineString(coords)
+        except (ValueError, TypeError) as e:
+            log.error(f"Failed to create LineString from coordinates: {str(e)}")
+            return None
 
     ##
     ##
@@ -602,7 +677,6 @@ class Burbing:
     ##
     ##
     def create_gpx_track(self, g, edges, simplify=False):
-
         # create GPX XML.
 
         stats_distance = 0.0
@@ -612,7 +686,6 @@ class Burbing:
         gpx = gpxpy.gpx.GPX()
         gpx.name = f'burb {self.name}'
         gpx.author_name = 'optiburb'
-        #gpx.author_email =''
         gpx.creator = 'experimental burbing'
         gpx.description = f'experimental burbing route for {self.name}'
 
@@ -626,7 +699,6 @@ class Burbing:
         i = 1
 
         for n, edge in enumerate(edges):
-
             u, v = edge
             edge_data = g.get_edge_data(*edge, 0)
 
@@ -634,6 +706,15 @@ class Burbing:
 
             if edge_data is None:
                 log.warning('null data for edge %s', edge)
+                # Create straight line between nodes
+                try:
+                    u_coords = (g.nodes[u]['x'], g.nodes[u]['y'])
+                    v_coords = (g.nodes[v]['x'], g.nodes[v]['y'])
+                    segment.points.append(gpxpy.gpx.GPXRoutePoint(latitude=u_coords[1], longitude=u_coords[0]))
+                    segment.points.append(gpxpy.gpx.GPXRoutePoint(latitude=v_coords[1], longitude=v_coords[0]))
+                    i += 2
+                except (KeyError, AttributeError) as e:
+                    log.error(f"Cannot create straight line for edge {edge}: {str(e)}")
                 continue
 
             linestring = edge_data.get('geometry')
@@ -642,42 +723,43 @@ class Burbing:
 
             log.debug(' leg [%d] -> %s (%s,%s,%s,%s,%s)', n, edge_data.get('name', ''), edge_data.get('highway', ''), edge_data.get('surface', ''), edge_data.get('oneway', ''), edge_data.get('access', ''), edge_data.get('length', 0))
 
+            coords_to_use = None
             if linestring:
+                directional_linestring = self.directional_linestring(edge, linestring)
+                if directional_linestring:
+                    coords_to_use = directional_linestring
 
-                directional_linestring = self.directional_linestring(g, edge)
+            if coords_to_use is None:
+                # If no valid linestring, create straight line between nodes
+                try:
+                    u_coords = (g.nodes[u]['x'], g.nodes[u]['y'])
+                    v_coords = (g.nodes[v]['x'], g.nodes[v]['y'])
+                    coords_to_use = [u_coords, v_coords]
+                    log.debug(f"Using straight line for edge {edge}")
+                except (KeyError, AttributeError) as e:
+                    log.error(f"Cannot create straight line for edge {edge}: {str(e)}")
+                    continue
 
-                for lon, lat in directional_linestring.coords:
-                    segment.points.append(gpxpy.gpx.GPXRoutePoint(latitude=lat, longitude=lon))
-                    log.debug('     INDEX[%d] = (%s, %s)', i, lat, lon)
-                    i += 1
-                    pass
-                pass
-            else:
-                log.error('  no linestring for edge=%s', edge)
-                pass
+            for lon, lat in coords_to_use:
+                segment.points.append(gpxpy.gpx.GPXRoutePoint(latitude=lat, longitude=lon))
+                log.debug('     INDEX[%d] = (%s, %s)', i, lat, lon)
+                i += 1
 
             if edge_data.get('augmented', False):
                 stats_backtrack += edge_data.get('length', 0)
-                pass
-
-            pass
 
         log.info('total distance = %.2fkm', stats_distance/1000.0)
         log.info('backtrack distance = %.2fkm', stats_backtrack/1000.0)
         
-        ##
-        ##
         if simplify:
             log.info('simplifying GPX')
             gpx.simplify()
-            pass
 
         data = gpx.to_xml()
         filename = f'burb_track_{self.name}.gpx'
 
         with open(filename, 'w') as f:
             f.write(data)
-            pass
 
         return
 
