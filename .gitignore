@@ -128,5 +128,8 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-#GPX files
+#User files
 *.gpx
+web/activities/*
+web/cache/*
+web/uploads/*
