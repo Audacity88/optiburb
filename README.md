@@ -21,6 +21,29 @@ and algorithms.  This program just glues them together.
 There are some options to prune out unnamed gravel tracks, to import
 boundaries from shapefiles
 
+## Web Interface
+
+A web interface has been added to make route generation more accessible. Features include:
+
+* Easy-to-use form for entering location and options
+* Real-time progress updates during route generation
+* Interactive map visualization of the generated route
+* One-click GPX file download
+* Mobile-friendly responsive design
+
+To run the web interface:
+
+```bash
+cd web
+flask run
+```
+
+Then open your browser to `http://localhost:5000`
+
+## Command Line Interface
+
+The original command line interface is still available for those who prefer it or need to automate route generation.
+
 ## Limitations
 
 Some known limitations:
@@ -36,21 +59,25 @@ Some known limitations:
 
 ## Requirements
 
-This repo hasn't been set up as a proper installation or package yet -
-it's just a script and you'll need to sort out your own Python
-dependencies.  You will need to pip install the following
-packages (tested on late version of Python 3 only so far).
-
-* shapely
-* gpxpy
-* numpy
-* networkx
-* geopandas
-* osmnx
+This project requires Python 3.9 or later. You can install all required dependencies using pip:
 
 ```bash
 pip install -r requirements.txt
 ```
+
+Core dependencies include:
+* shapely - Geometric operations
+* gpxpy - GPX file handling
+* numpy - Numerical computations
+* networkx - Graph algorithms
+* geopandas - Geographic data handling
+* osmnx - OpenStreetMap network analysis
+* flask - Web interface (new)
+
+The web interface uses:
+* Leaflet.js - Interactive maps
+* Tailwind CSS - Styling
+* Server-Sent Events (SSE) - Real-time progress updates
 
 ## Options
 
@@ -141,3 +168,16 @@ like this:
 ```
 
 For very dense suburbs, this might be huge.
+
+## Modifications
+
+The original command-line tool has been enhanced with the following features:
+
+* Web interface for easier route generation
+* Real-time progress tracking during route generation
+* Interactive map visualization of routes
+* Improved error handling and user feedback
+* Mobile-friendly responsive design
+* Server-side improvements for file handling and progress updates
+
+These modifications were made by Dan Gilles in 2024, building upon the original work by Jim Crumpler.
