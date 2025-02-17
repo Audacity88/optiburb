@@ -1,14 +1,42 @@
-from flask import Flask, render_template, request, jsonify, send_file, Response
+from flask import Flask, render_template, request, jsonify, send_file, Response, redirect, session, url_for
 import os
 import sys
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import argparse
 import json
 import queue
 import threading
 import shutil
 import gpxpy
+import requests
+from functools import wraps
+from dotenv import load_dotenv
+from urllib.parse import quote
+from shapely.geometry import LineString, Point, box
+from shapely.ops import unary_union
+import time
+import hashlib
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,  # Change to DEBUG level
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    force=True  # Force configuration
+)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)  # Ensure logger level is DEBUG
+
+# Add a stream handler if none exists
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Add parent directory to path to import optiburb
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -16,21 +44,380 @@ sys.path.append(ROOT_DIR)
 from optiburb import Burbing
 
 app = Flask(__name__)
+app.secret_key = os.getenv('FLASK_SECRET_KEY')
+if not app.secret_key:
+    logger.warning("No FLASK_SECRET_KEY found in environment, using a default key")
+    app.secret_key = '4f8d7b972df4abe259e2d37c7ddbae734dd9f26654e73269910e12f7381f694b'
+
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
+app.config['ACTIVITIES_FOLDER'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'activities')
+app.config['SESSION_COOKIE_SECURE'] = False  # Allow session cookie over HTTP
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['PERMANENT_SESSION_LIFETIME'] = 3600  # 1 hour
+
+# Create necessary directories
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(app.config['ACTIVITIES_FOLDER'], exist_ok=True)
+
+logger.info("Flask Configuration:")
+logger.info(f"Secret key set: {bool(app.secret_key)}")
+logger.info(f"Upload folder: {app.config['UPLOAD_FOLDER']}")
+logger.info(f"Session cookie secure: {app.config['SESSION_COOKIE_SECURE']}")
+
+# Strava API Configuration
+STRAVA_CLIENT_ID = os.getenv('STRAVA_CLIENT_ID')
+STRAVA_CLIENT_SECRET = os.getenv('STRAVA_CLIENT_SECRET')
+STRAVA_REDIRECT_URI = 'http://localhost:5001/strava/callback'
+
+# Debug logging for environment variables
+logger.info(f"Loaded STRAVA_CLIENT_ID: {STRAVA_CLIENT_ID}")
+logger.info(f"Loaded STRAVA_REDIRECT_URI: {STRAVA_REDIRECT_URI}")
+
+if not STRAVA_REDIRECT_URI:
+    STRAVA_REDIRECT_URI = 'http://localhost:5001/strava/callback'
+    logger.warning(f"STRAVA_REDIRECT_URI not found in environment, using default: {STRAVA_REDIRECT_URI}")
 
 # Create uploads directory if it doesn't exist
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
 # Progress queue for each session
 progress_queues = {}
+
+# Activity cache without TTL
+activity_cache = {}
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'strava_token' not in session:
+            return redirect(url_for('strava_login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+def get_strava_segments(bounds, access_token):
+    """Fetch Strava segments within the given bounds."""
+    url = "https://www.strava.com/api/v3/segments/explore"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    params = {
+        "bounds": f"{bounds['minLat']},{bounds['minLng']},{bounds['maxLat']},{bounds['maxLng']}",
+        "activity_type": "riding"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching Strava segments: {str(e)}")
+        return None
+
+def get_athlete_segments(access_token):
+    """Fetch athlete's completed segments."""
+    url = "https://www.strava.com/api/v3/segments/starred"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching athlete segments: {str(e)}")
+        return None
+
+@app.route('/')
+def index():
+    logger.info(f"Session contents: {session}")
+    logger.info(f"Is authenticated: {'strava_token' in session}")
+    return render_template('index.html')
+
+@app.route('/strava/login')
+def strava_login():
+    encoded_redirect_uri = quote(STRAVA_REDIRECT_URI)
+    auth_url = (
+        "https://www.strava.com/oauth/authorize?"
+        f"client_id={STRAVA_CLIENT_ID}&"
+        "response_type=code&"
+        f"redirect_uri={encoded_redirect_uri}&"
+        "approval_prompt=force&"
+        "scope=activity:read_all"
+    )
+    logger.info(f"Redirecting to Strava auth URL: {auth_url}")
+    return redirect(auth_url)
+
+def get_cache_key(access_token):
+    """Generate a unique cache key for the user's activities."""
+    # Create a hash of the access token to use as the filename
+    return hashlib.sha256(access_token.encode()).hexdigest()
+
+def save_activities_to_disk(access_token, activities):
+    """Save activities to a JSON file on disk."""
+    cache_key = get_cache_key(access_token)
+    file_path = os.path.join(app.config['ACTIVITIES_FOLDER'], f"{cache_key}.json")
+    
+    try:
+        with open(file_path, 'w') as f:
+            json.dump({
+                'timestamp': datetime.now().isoformat(),
+                'activities': activities
+            }, f)
+        logger.info(f"Saved {len(activities)} activities to disk")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving activities to disk: {str(e)}")
+        return False
+
+def load_activities_from_disk(access_token):
+    """Load activities from disk and check if we need to fetch new ones."""
+    cache_key = get_cache_key(access_token)
+    file_path = os.path.join(app.config['ACTIVITIES_FOLDER'], f"{cache_key}.json")
+    
+    if not os.path.exists(file_path):
+        logger.info("No cached activities file found")
+        return None, True  # No cache, need to fetch
+        
+    try:
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+            
+        # Check if the cache is older than 24 hours
+        cache_time = datetime.fromisoformat(data['timestamp'])
+        needs_update = datetime.now() - cache_time > timedelta(hours=24)
+        
+        if needs_update:
+            logger.info("Cached activities are older than 24 hours, will check for new ones")
+        
+        activities = data['activities']
+        logger.info(f"Loaded {len(activities)} activities from disk cache")
+        return activities, needs_update
+    except Exception as e:
+        logger.error(f"Error loading activities from disk: {str(e)}")
+        return None, True  # Error reading cache, need to fetch
+
+def fetch_new_activities(access_token, after_time):
+    """Fetch only new activities after the given timestamp."""
+    url = "https://www.strava.com/api/v3/athlete/activities"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    params = {
+        "per_page": 200,  # Maximum allowed by Strava
+        "after": int(after_time.timestamp())  # Convert to Unix timestamp
+    }
+    
+    new_activities = []
+    page = 1
+    
+    try:
+        logger.info("Fetching new activities")
+        while True:
+            params['page'] = page
+            logger.info(f"Fetching page {page} of new activities")
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            
+            page_activities = response.json()
+            if not page_activities:
+                break
+                
+            new_activities.extend(page_activities)
+            logger.info(f"Fetched {len(page_activities)} new activities from page {page}")
+            
+            if len(page_activities) < params['per_page']:
+                break
+                
+            page += 1
+            time.sleep(0.1)  # Rate limiting
+        
+        logger.info(f"Total new activities fetched: {len(new_activities)}")
+        return new_activities
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching new activities: {str(e)}")
+        return None
+
+def fetch_and_cache_activities(access_token):
+    """Fetch all user activities and store them in both memory and disk cache."""
+    # First try to load from disk
+    existing_activities, needs_update = load_activities_from_disk(access_token)
+    
+    if existing_activities and not needs_update:
+        # Store in memory cache and return if cache is fresh
+        cache_key = get_cache_key(access_token)
+        activity_cache[cache_key] = existing_activities
+        return existing_activities
+    
+    if existing_activities and needs_update:
+        # We have existing activities but need to check for new ones
+        logger.info("Checking for new activities since last cache")
+        cache_time = datetime.fromisoformat(json.load(open(
+            os.path.join(app.config['ACTIVITIES_FOLDER'], f"{get_cache_key(access_token)}.json")
+        ))['timestamp'])
+        
+        new_activities = fetch_new_activities(access_token, cache_time)
+        
+        if new_activities:
+            # Combine existing and new activities, removing duplicates by ID
+            activity_ids = {a['id'] for a in existing_activities}
+            unique_new_activities = [a for a in new_activities if a['id'] not in activity_ids]
+            
+            if unique_new_activities:
+                logger.info(f"Found {len(unique_new_activities)} new activities")
+                all_activities = unique_new_activities + existing_activities
+                
+                # Update both caches with combined activities
+                cache_key = get_cache_key(access_token)
+                activity_cache[cache_key] = all_activities
+                save_activities_to_disk(access_token, all_activities)
+                
+                return all_activities
+        
+        # If no new activities or error fetching them, use existing cache
+        logger.info("No new activities found, using existing cache")
+        cache_key = get_cache_key(access_token)
+        activity_cache[cache_key] = existing_activities
+        return existing_activities
+    
+    # No existing activities, fetch all
+    url = "https://www.strava.com/api/v3/athlete/activities"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    params = {
+        "per_page": 200  # Maximum allowed by Strava
+    }
+    
+    activities = []
+    page = 1
+    
+    try:
+        logger.info("Fetching all user activities")
+        while True:
+            params['page'] = page
+            logger.info(f"Fetching page {page} of activities")
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            
+            page_activities = response.json()
+            if not page_activities:
+                break
+                
+            activities.extend(page_activities)
+            logger.info(f"Fetched {len(page_activities)} activities from page {page}")
+            
+            if len(page_activities) < params['per_page']:
+                break
+                
+            page += 1
+            time.sleep(0.1)
+        
+        logger.info(f"Total activities fetched: {len(activities)}")
+        
+        if activities:
+            # Store in both caches
+            cache_key = get_cache_key(access_token)
+            activity_cache[cache_key] = activities
+            save_activities_to_disk(access_token, activities)
+        
+        return activities
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching user activities: {str(e)}")
+        return None
+
+def get_user_activities(access_token, bounds):
+    """Get user activities within the given bounds from cache."""
+    cache_key = get_cache_key(access_token)
+    
+    # Try memory cache first
+    activities = activity_cache.get(cache_key)
+    
+    # If not in memory, try disk cache
+    if not activities:
+        activities, _ = load_activities_from_disk(access_token)
+        if activities:
+            # Store in memory cache for future use
+            activity_cache[cache_key] = activities
+    
+    if not activities:
+        logger.warning("No activities found in cache - they should have been pre-loaded")
+        return None
+    
+    logger.info(f"Using {len(activities)} cached activities")
+    
+    # Filter activities by bounds
+    filtered_activities = []
+    logger.info(f"Filtering {len(activities)} activities for bounds: {bounds}")
+    
+    for activity in activities:
+        if activity.get('map', {}).get('summary_polyline'):
+            coords = decode_polyline(activity['map']['summary_polyline'])
+            if coords:
+                # Check if any point of the activity is within bounds
+                for lat, lng in coords:
+                    if (bounds['minLat'] <= lat <= bounds['maxLat'] and 
+                        bounds['minLng'] <= lng <= bounds['maxLng']):
+                        filtered_activities.append(activity)
+                        break
+    
+    logger.info(f"Found {len(filtered_activities)} activities in bounds")
+    return filtered_activities
+
+@app.route('/strava/callback')
+def strava_callback():
+    logger.info(f"Callback received. Full URL: {request.url}")
+    logger.info(f"Request headers: {dict(request.headers)}")
+    logger.info(f"Request args: {request.args}")
+    
+    if request.headers.get('Host', '').startswith('127.0.0.1'):
+        original_url = request.url
+        redirected_url = original_url.replace('127.0.0.1', 'localhost')
+        logger.info(f"Redirecting from {original_url} to {redirected_url}")
+        return redirect(redirected_url)
+    
+    code = request.args.get('code')
+    if not code:
+        logger.error("No code received in callback")
+        return "Error: No code received", 400
+    
+    try:
+        # Exchange the authorization code for an access token
+        token_url = "https://www.strava.com/oauth/token"
+        data = {
+            'client_id': STRAVA_CLIENT_ID,
+            'client_secret': STRAVA_CLIENT_SECRET,
+            'code': code,
+            'grant_type': 'authorization_code'
+        }
+        
+        logger.info("Exchanging authorization code for token")
+        logger.info(f"Token request data: {data}")
+        
+        response = requests.post(token_url, data=data)
+        logger.info(f"Token response status: {response.status_code}")
+        logger.info(f"Token response: {response.text}")
+        response.raise_for_status()
+        
+        # Store the token in the session
+        token_data = response.json()
+        session['strava_token'] = token_data
+        logger.info("Successfully stored token in session")
+        
+        # Fetch and cache activities immediately after getting the token
+        access_token = token_data['access_token']
+        cache_key = get_cache_key(access_token)
+        
+        if cache_key not in activity_cache:
+            logger.info("Fetching initial activities cache")
+            activities = fetch_and_cache_activities(access_token)
+            if not activities:
+                logger.error("Failed to fetch initial activities")
+                # Continue anyway - we'll try again when needed
+            else:
+                logger.info(f"Successfully cached {len(activities)} activities")
+        else:
+            logger.info("Activities already cached")
+        
+        # Redirect to the main page
+        return redirect(url_for('index'))
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error exchanging code for token: {str(e)}")
+        return f"Error: Failed to exchange code for token - {str(e)}", 500
 
 class ProgressHandler(logging.Handler):
     def __init__(self, queue):
@@ -90,10 +477,6 @@ class ProgressHandler(logging.Handler):
         except Exception as e:
             logger.error(f"Error in progress handler: {str(e)}")
 
-@app.route('/')
-def index():
-    return render_template('index.html')
-
 @app.route('/progress/<session_id>')
 def progress(session_id):
     def generate():
@@ -126,6 +509,42 @@ def generate_route():
         # Create progress handler
         progress_handler = ProgressHandler(progress_queue)
         logger.addHandler(progress_handler)
+
+        # Check for Strava authentication and cached activities
+        if 'strava_token' in session:
+            access_token = session['strava_token']['access_token']
+            cache_key = get_cache_key(access_token)
+            
+            if cache_key in activity_cache:
+                activities = activity_cache[cache_key]
+                logger.info(f"Using {len(activities)} existing cached activities")
+                progress_queue.put(json.dumps({
+                    'type': 'progress',
+                    'step': 'Loading Strava activities',
+                    'progress': 4,
+                    'message': f'Using {len(activities)} cached activities'
+                }))
+            else:
+                logger.info("No activities in cache, fetching from Strava")
+                progress_queue.put(json.dumps({
+                    'type': 'progress',
+                    'step': 'Loading Strava activities',
+                    'progress': 2,
+                    'message': 'Fetching your activities...'
+                }))
+                
+                activities = fetch_and_cache_activities(access_token)
+                if not activities:
+                    logger.warning("Failed to fetch activities from Strava")
+                    return jsonify({'error': 'Failed to load Strava activities'}), 500
+                
+                logger.info(f"Successfully cached {len(activities)} activities")
+                progress_queue.put(json.dumps({
+                    'type': 'progress',
+                    'step': 'Loading Strava activities',
+                    'progress': 4,
+                    'message': f'Successfully loaded {len(activities)} activities'
+                }))
         
         # Convert dictionary to argparse.Namespace
         options = argparse.Namespace(
@@ -250,8 +669,10 @@ def get_route_data(filename):
     try:
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         if not os.path.exists(file_path):
+            logger.error(f"File not found: {file_path}")
             raise FileNotFoundError(f"File not found: {filename}")
         
+        logger.info(f"Reading GPX file: {file_path}")
         # Parse GPX file
         with open(file_path, 'r') as gpx_file:
             gpx = gpxpy.parse(gpx_file)
@@ -261,6 +682,11 @@ def get_route_data(filename):
         for track in gpx.tracks:
             for segment in track.segments:
                 coordinates = [[point.longitude, point.latitude] for point in segment.points]
+                if not coordinates:
+                    logger.warning(f"No coordinates found in track segment")
+                    continue
+                    
+                logger.info(f"Found {len(coordinates)} points in track segment")
                 feature = {
                     "type": "Feature",
                     "geometry": {
@@ -272,6 +698,10 @@ def get_route_data(filename):
                     }
                 }
                 features.append(feature)
+        
+        if not features:
+            logger.error("No valid features found in GPX file")
+            return jsonify({'error': 'No valid route data found'}), 400
         
         geojson = {
             "type": "FeatureCollection",
@@ -287,17 +717,316 @@ def get_route_data(filename):
                 "minLng": min(c[0] for c in coords),
                 "maxLng": max(c[0] for c in coords)
             }
+            logger.info(f"Calculated bounds: {bounds}")
         else:
+            logger.error("No coordinates found to calculate bounds")
             bounds = None
         
-        return jsonify({
+        response_data = {
             "geojson": geojson,
             "bounds": bounds
-        })
+        }
+        logger.info("Successfully prepared route data")
+        return jsonify(response_data)
         
     except Exception as e:
         logger.error(f"Error getting route data: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
+@app.route('/strava/segments')
+@login_required
+def get_segments():
+    """Get Strava segments within the given bounds."""
+    try:
+        bounds = json.loads(request.args.get('bounds'))
+        access_token = session['strava_token']['access_token']
+        
+        # Get segments in the area
+        segments_data = get_strava_segments(bounds, access_token)
+        if not segments_data:
+            return jsonify({'error': 'Failed to fetch segments'}), 500
+        
+        # Get athlete's completed segments
+        athlete_segments = get_athlete_segments(access_token)
+        completed_segment_ids = set()
+        if athlete_segments:
+            completed_segment_ids = {segment['id'] for segment in athlete_segments}
+        
+        # Process segments
+        segments = []
+        for segment in segments_data.get('segments', []):
+            try:
+                segment_info = {
+                    'id': segment.get('id'),
+                    'name': segment.get('name', 'Unnamed Segment'),
+                    'distance': segment.get('distance', 0),
+                    'total_elevation_gain': segment.get('elevation_gain', 0),  # Changed from total_elevation_gain
+                    'points': decode_polyline(segment.get('points', '')),
+                    'completed': segment.get('id') in completed_segment_ids
+                }
+                segments.append(segment_info)
+            except Exception as e:
+                logger.warning(f"Error processing segment {segment.get('id')}: {str(e)}")
+                continue
+        
+        logger.info(f"Successfully processed {len(segments)} segments")
+        return jsonify({
+            'segments': segments
+        })
+        
+    except Exception as e:
+        logger.error(f"Error processing segments: {str(e)}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+def decode_polyline(polyline):
+    """Decode a Google encoded polyline string into a list of coordinates."""
+    coordinates = []
+    index = 0
+    lat = 0
+    lng = 0
+    
+    while index < len(polyline):
+        for coordinate in [lat, lng]:
+            shift = 0
+            result = 0
+            
+            while True:
+                byte = ord(polyline[index]) - 63
+                index += 1
+                result |= (byte & 0x1F) << shift
+                shift += 5
+                if not byte >= 0x20:
+                    break
+            
+            if result & 1:
+                result = ~(result >> 1)
+            else:
+                result >>= 1
+                
+            if coordinate == lat:
+                lat += result
+            else:
+                lng += result
+                coordinates.append([lat / 100000.0, lng / 100000.0])
+    
+    return coordinates
+
+def create_activity_map(activities):
+    """Create a map of completed streets from activities."""
+    activity_lines = []
+    
+    logger.info(f"Creating activity map from {len(activities)} activities")
+    for i, activity in enumerate(activities):
+        if activity.get('map', {}).get('summary_polyline'):
+            coords = decode_polyline(activity['map']['summary_polyline'])
+            if coords:
+                try:
+                    # Fix coordinate order: coords from decode_polyline are [lat, lng]
+                    # Convert to [lng, lat] for LineString
+                    line_coords = [[lng, lat] for lat, lng in coords]
+                    line = LineString(line_coords)
+                    # Increase buffer size to 40 meters (roughly 0.0004 degrees)
+                    buffered_line = line.buffer(0.0004)
+                    activity_lines.append(buffered_line)
+                    logger.debug(f"Added activity {i+1} to map with {len(coords)} points")
+                    # Log the bounds of this activity
+                    bounds = line.bounds
+                    logger.debug(f"Activity {i+1} bounds: minLng={bounds[0]}, minLat={bounds[1]}, maxLng={bounds[2]}, maxLat={bounds[3]}")
+                except Exception as e:
+                    logger.warning(f"Error processing activity {i+1}: {str(e)}")
+                    continue
+    
+    if activity_lines:
+        logger.info(f"Successfully processed {len(activity_lines)} activities for the map")
+        try:
+            combined_map = unary_union(activity_lines)
+            combined_bounds = combined_map.bounds
+            logger.info(f"Successfully created unified activity map with bounds: minLng={combined_bounds[0]}, minLat={combined_bounds[1]}, maxLng={combined_bounds[2]}, maxLat={combined_bounds[3]}")
+            return combined_map
+        except Exception as e:
+            logger.error(f"Error creating unified activity map: {str(e)}")
+            return None
+    else:
+        logger.warning("No valid activities found to create map")
+        return None
+
+@app.route('/route/<filename>/completion')
+@login_required
+def get_route_completion(filename):
+    try:
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        if not os.path.exists(file_path):
+            logger.error(f"File not found: {file_path}")
+            raise FileNotFoundError(f"File not found: {filename}")
+        
+        logger.info(f"Starting route completion calculation for: {filename}")
+        
+        # Parse GPX file
+        with open(file_path, 'r') as gpx_file:
+            gpx = gpxpy.parse(gpx_file)
+            logger.info("Successfully parsed GPX file")
+        
+        # Get route bounds
+        bounds = {
+            "minLat": min(point.latitude for track in gpx.tracks for segment in track.segments for point in segment.points),
+            "maxLat": max(point.latitude for track in gpx.tracks for segment in track.segments for point in segment.points),
+            "minLng": min(point.longitude for track in gpx.tracks for segment in track.segments for point in segment.points),
+            "maxLng": max(point.longitude for track in gpx.tracks for segment in track.segments for point in segment.points)
+        }
+        logger.info(f"Route bounds: {bounds}")
+        
+        # Get user's activities in the area
+        access_token = session['strava_token']['access_token']
+        logger.info("Fetching activities within bounds...")
+        activities = get_user_activities(access_token, bounds)
+        
+        if not activities:
+            logger.warning("No activities found in the area")
+            return jsonify({
+                "completed_segments": [],
+                "incomplete_segments": [],
+                "total_completion": 0,
+                "total_distance": 0,
+                "completed_distance": 0,
+                "activities": []
+            })
+        
+        logger.info(f"Found {len(activities)} activities in the area")
+        
+        # Process activities for display
+        activity_features = []
+        for i, activity in enumerate(activities):
+            if activity.get('map', {}).get('summary_polyline'):
+                coords = decode_polyline(activity['map']['summary_polyline'])
+                if coords:
+                    logger.debug(f"Processing activity {i+1}: {activity.get('name')} with {len(coords)} coordinates")
+                    feature = {
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "LineString",
+                            "coordinates": [[lng, lat] for lat, lng in coords]
+                        },
+                        "properties": {
+                            "name": activity.get('name', 'Unnamed Activity'),
+                            "distance": activity.get('distance', 0),
+                            "date": activity.get('start_date_local', ''),
+                            "type": activity.get('type', 'Unknown'),
+                            "id": str(activity.get('id', ''))
+                        }
+                    }
+                    activity_features.append(feature)
+        
+        logger.info(f"Processed {len(activity_features)} activities for display")
+        
+        # Create activity map
+        logger.info("Creating activity map from processed activities...")
+        activity_map = create_activity_map(activities)
+        
+        if not activity_map:
+            logger.warning("Could not create activity map from activities")
+            return jsonify({
+                "completed_segments": [],
+                "incomplete_segments": [],
+                "total_completion": 0,
+                "total_distance": 0,
+                "completed_distance": 0,
+                "activities": activity_features
+            })
+        
+        logger.info("Successfully created activity map")
+        
+        # Process route segments and check completion
+        completed_segments = []
+        incomplete_segments = []
+        total_distance = 0
+        completed_distance = 0
+        
+        logger.info("Starting route segment processing...")
+        
+        # Break the route into smaller segments
+        for track_idx, track in enumerate(gpx.tracks):
+            for segment_idx, segment in enumerate(track.segments):
+                # Split segment into smaller sub-segments
+                points = segment.points
+                for i in range(len(points) - 1):
+                    # Create a sub-segment between consecutive points
+                    start_point = points[i]
+                    end_point = points[i + 1]
+                    
+                    coords = [
+                        [start_point.longitude, start_point.latitude],
+                        [end_point.longitude, end_point.latitude]
+                    ]
+                    
+                    route_segment = LineString(coords)
+                    segment_length = route_segment.length
+                    total_distance += segment_length
+                    
+                    logger.debug(f"Processing sub-segment {i} of segment {segment_idx} in track {track_idx}")
+                    logger.debug(f"Sub-segment length: {segment_length * 111:.2f}km")
+                    
+                    try:
+                        # Check if the sub-segment intersects with completed activities
+                        intersects = route_segment.intersects(activity_map)
+                        logger.debug(f"Sub-segment intersects with activities: {intersects}")
+                        
+                        if intersects:
+                            # Calculate percentage of sub-segment that's been completed
+                            intersection = route_segment.intersection(activity_map)
+                            intersection_length = intersection.length if hasattr(intersection, 'length') else 0
+                            completion_ratio = intersection_length / segment_length
+                            logger.debug(f"Sub-segment intersection length: {intersection_length * 111:.2f}km")
+                            logger.debug(f"Sub-segment completion ratio: {completion_ratio:.2%}")
+                            
+                            if completion_ratio > 0.9:  # Consider it complete if 90% is done
+                                logger.debug(f"Sub-segment marked as completed")
+                                completed_segments.append({
+                                    "coordinates": coords,
+                                    "completion": 1.0
+                                })
+                                completed_distance += segment_length
+                            else:
+                                logger.debug(f"Sub-segment partially completed: {completion_ratio:.2%}")
+                                incomplete_segments.append({
+                                    "coordinates": coords,
+                                    "completion": completion_ratio
+                                })
+                                completed_distance += (segment_length * completion_ratio)
+                        else:
+                            logger.debug(f"Sub-segment has no intersection with activities")
+                            incomplete_segments.append({
+                                "coordinates": coords,
+                                "completion": 0.0
+                            })
+                    except Exception as e:
+                        logger.error(f"Error processing sub-segment: {str(e)}", exc_info=True)
+                        incomplete_segments.append({
+                            "coordinates": coords,
+                            "completion": 0.0
+                        })
+        
+        # Calculate total completion
+        total_completion = completed_distance / total_distance if total_distance > 0 else 0
+        
+        logger.info(f"Route processing complete:")
+        logger.info(f"Completed segments: {len(completed_segments)}")
+        logger.info(f"Incomplete segments: {len(incomplete_segments)}")
+        logger.info(f"Total distance: {total_distance * 111:.2f}km")
+        logger.info(f"Completed distance: {completed_distance * 111:.2f}km")
+        logger.info(f"Total completion: {total_completion:.2%}")
+        
+        return jsonify({
+            "completed_segments": completed_segments,
+            "incomplete_segments": incomplete_segments,
+            "total_completion": total_completion,
+            "total_distance": total_distance,
+            "completed_distance": completed_distance,
+            "activities": activity_features
+        })
+            
+    except Exception as e:
+        logger.error(f"Error checking route completion: {str(e)}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
-    app.run(debug=True, port=5000) 
+    app.run(host='0.0.0.0', debug=True, port=5001) 

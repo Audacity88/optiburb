@@ -180,4 +180,4 @@ The original command-line tool has been enhanced with the following features:
 * Mobile-friendly responsive design
 * Server-side improvements for file handling and progress updates
 
-These modifications were made by Dan Gilles in 2024, building upon the original work by Jim Crumpler.
+These modifications were made by Dan Gilles in 2025, building upon the original work by Jim Crumpler.
