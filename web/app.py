@@ -552,6 +552,7 @@ def generate_route():
             prune=data.get('prune', False),
             simplify_gpx=data.get('simplify_gpx', True),
             feature_deadend=data.get('feature_deadend', False),
+            exclude_completed=data.get('exclude_completed', False),
             debug='info',
             start=start_point,
             names=[location],
@@ -584,29 +585,208 @@ def generate_route():
         if start_point:
             burbing.set_start_location(start_point)
         
-        # Load and process the graph
-        burbing.load(options)
-        
-        if options.prune:
-            burbing.prune()
-        
-        burbing.determine_nodes()
-        
-        if options.feature_deadend:
-            burbing.optimise_dead_ends()
-        
-        burbing.determine_combinations()
-        burbing.determine_circuit()
-        
-        # Format location string to match the Burbing class format
-        formatted_location = location.lower().replace(' ', '_').replace(',', '')
-        
-        # Generate GPX file
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        gpx_filename = f'burb_track_{formatted_location}_{timestamp}.gpx'
-        
-        # Create GPX file
-        burbing.create_gpx_track(burbing.g_augmented, burbing.euler_circuit, options.simplify_gpx)
+        # If exclude_completed is enabled and user is authenticated with Strava
+        if options.exclude_completed and 'strava_token' in session:
+            try:
+                logger.info("Excluding completed roads from route generation")
+                progress_queue.put(json.dumps({
+                    'type': 'progress',
+                    'step': 'Processing Strava data',
+                    'progress': 10,
+                    'message': 'Checking completed roads...'
+                }))
+                
+                # Get the bounds of the polygon
+                bounds = {
+                    'minLat': polygon.bounds[1],
+                    'maxLat': polygon.bounds[3],
+                    'minLng': polygon.bounds[0],
+                    'maxLng': polygon.bounds[2]
+                }
+                
+                # Get user's activities in the area
+                activities = get_user_activities(session['strava_token']['access_token'], bounds)
+                if not activities:
+                    logger.warning("No activities found in the area")
+                    progress_queue.put(json.dumps({
+                        'type': 'progress',
+                        'step': 'Processing Strava data',
+                        'progress': 15,
+                        'message': 'No activities found in this area'
+                    }))
+                else:
+                    logger.info(f"Found {len(activities)} activities in the area")
+                    # Create a list of completed road areas
+                    completed_roads = []
+                    for activity in activities:
+                        if activity.get('map', {}).get('summary_polyline'):
+                            points = decode_polyline(activity['map']['summary_polyline'])
+                            if points:
+                                try:
+                                    # Convert points to LineString
+                                    line_coords = [[lng, lat] for lat, lng in points]
+                                    line = LineString(line_coords)
+                                    # Buffer the line to create an area (20 meters wide - reduced from 40)
+                                    buffered_line = line.buffer(0.0002)  # Reduced buffer size
+                                    completed_roads.append(buffered_line)
+                                except Exception as e:
+                                    logger.warning(f"Error processing activity {activity.get('id')}: {str(e)}")
+                                    continue
+                    
+                    if completed_roads:
+                        try:
+                            logger.info(f"Combining {len(completed_roads)} completed road areas")
+                            completed_area = unary_union(completed_roads)
+                            # Store original area for comparison
+                            original_area = polygon.area
+                            # Subtract completed roads from the polygon
+                            polygon = polygon.difference(completed_area)
+                            
+                            # Check if we haven't excluded too much
+                            if polygon.area < (original_area * 0.1):  # If less than 10% remains
+                                logger.warning("Too much area would be excluded, reverting to original polygon")
+                                progress_queue.put(json.dumps({
+                                    'type': 'progress',
+                                    'step': 'Processing Strava data',
+                                    'progress': 15,
+                                    'message': 'Too many completed roads, using original area'
+                                }))
+                            else:
+                                # Update the polygon in the Burbing instance
+                                burbing.polygons = [polygon]
+                                burbing.polygon_names = [location]
+                                burbing.completed_area = completed_area
+                                logger.info("Successfully excluded completed roads from route area")
+                                progress_queue.put(json.dumps({
+                                    'type': 'progress',
+                                    'step': 'Processing Strava data',
+                                    'progress': 15,
+                                    'message': f'Excluded {len(completed_roads)} completed road sections'
+                                }))
+                        except Exception as e:
+                            logger.error(f"Error processing completed roads: {str(e)}", exc_info=True)
+                            progress_queue.put(json.dumps({
+                                'type': 'error',
+                                'message': f'Error excluding completed roads: {str(e)}'
+                            }))
+                            return jsonify({'error': f'Error excluding completed roads: {str(e)}'}), 500
+            except Exception as e:
+                logger.error(f"Error in Strava processing: {str(e)}", exc_info=True)
+                progress_queue.put(json.dumps({
+                    'type': 'error',
+                    'message': f'Error processing Strava data: {str(e)}'
+                }))
+                return jsonify({'error': f'Error processing Strava data: {str(e)}'}), 500
+
+        try:
+            # Load and process the graph
+            burbing.load(options)
+            
+            # If we have completed roads to exclude, filter the graph after loading
+            if options.exclude_completed and hasattr(burbing, 'completed_area'):
+                logger.info("Filtering graph to exclude completed roads")
+                edges_to_remove = []
+                total_edges = len(burbing.g.edges())
+                edges_processed = 0
+                
+                # Create a buffer around the completed area for more reliable intersection checks
+                completed_area_buffer = burbing.completed_area.buffer(0.00005)  # ~5 meter buffer
+                
+                # Process edges in batches for progress updates
+                batch_size = max(1, total_edges // 10)  # Update progress every 10%
+                
+                for u, v, data in burbing.g.edges(data=True):
+                    edges_processed += 1
+                    
+                    # Update progress every batch_size edges
+                    if edges_processed % batch_size == 0:
+                        progress = int((edges_processed / total_edges) * 100)
+                        progress_queue.put(json.dumps({
+                            'type': 'progress',
+                            'step': 'Processing graph',
+                            'progress': 15 + (progress // 20),  # Scale from 15-20%
+                            'message': f'Checking road segments: {progress}%'
+                        }))
+                    
+                    try:
+                        if 'geometry' not in data:
+                            continue
+                            
+                        coords = data['geometry'].coords
+                        if len(coords) < 2:
+                            continue
+                            
+                        edge_line = LineString(coords)
+                        edge_buffer = edge_line.buffer(0.00002)  # ~2 meter buffer
+                        
+                        if edge_buffer.intersects(completed_area_buffer):
+                            intersection = edge_buffer.intersection(completed_area_buffer)
+                            intersection_area = intersection.area if hasattr(intersection, 'area') else 0
+                            overlap_ratio = intersection_area / edge_buffer.area
+                            
+                            if overlap_ratio > 0.4:
+                                edges_to_remove.append((u, v))
+                    except Exception as e:
+                        logger.warning(f"Error checking edge {u}-{v} intersection: {str(e)}")
+                        continue
+                
+                # Final progress update and edge removal
+                if edges_to_remove:
+                    if len(edges_to_remove) < (total_edges * 0.9):
+                        burbing.g.remove_edges_from(edges_to_remove)
+                        removed_percentage = (len(edges_to_remove) / total_edges) * 100
+                        logger.info(f"Removed {len(edges_to_remove)} completed road edges ({removed_percentage:.1f}%) from graph")
+                        progress_queue.put(json.dumps({
+                            'type': 'progress',
+                            'step': 'Processing graph',
+                            'progress': 20,
+                            'message': f'Excluded {len(edges_to_remove)} road segments ({removed_percentage:.1f}% of total)'
+                        }))
+                    else:
+                        logger.warning(f"Too many edges would be removed ({len(edges_to_remove)} of {total_edges}), keeping original graph")
+                        progress_queue.put(json.dumps({
+                            'type': 'progress',
+                            'step': 'Processing graph',
+                            'progress': 20,
+                            'message': 'Too many completed roads, using original network'
+                        }))
+                else:
+                    logger.info("No completed road edges found to remove")
+                    progress_queue.put(json.dumps({
+                        'type': 'progress',
+                        'step': 'Processing graph',
+                        'progress': 20,
+                        'message': 'No completed road segments found in this area'
+                    }))
+            
+            if options.prune:
+                burbing.prune()
+            
+            burbing.determine_nodes()
+            
+            if options.feature_deadend:
+                burbing.optimise_dead_ends()
+            
+            burbing.determine_combinations()
+            burbing.determine_circuit()
+            
+            # Format location string to match the Burbing class format
+            formatted_location = location.lower().replace(' ', '_').replace(',', '')
+            
+            # Generate GPX file
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            gpx_filename = f'burb_track_{formatted_location}_{timestamp}.gpx'
+            
+            # Create GPX file
+            burbing.create_gpx_track(burbing.g_augmented, burbing.euler_circuit, options.simplify_gpx)
+            
+        except Exception as e:
+            logger.error(f"Error in route generation: {str(e)}", exc_info=True)
+            progress_queue.put(json.dumps({
+                'type': 'error',
+                'message': f'Error generating route: {str(e)}'
+            }))
+            return jsonify({'error': f'Error generating route: {str(e)}'}), 500
         
         # The file will be created in the current directory (web/)
         # Look for the most recently created GPX file that matches our location
@@ -618,8 +798,10 @@ def generate_route():
             
         # Sort by creation time and get the most recent
         src_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
-                               sorted(gpx_files, key=lambda x: os.path.getctime(
-                                   os.path.join(os.path.dirname(os.path.abspath(__file__)), x)))[-1])
+                               sorted(gpx_files, 
+                                     key=lambda x: os.path.getctime(
+                                         os.path.join(os.path.dirname(os.path.abspath(__file__)), x)
+                                     ))[-1])
         dst_path = os.path.join(app.config['UPLOAD_FOLDER'], os.path.basename(src_path))
         
         # Move file to uploads directory
@@ -940,16 +1122,16 @@ def get_route_completion(filename):
         incomplete_segments = []
         total_distance = 0
         completed_distance = 0
+        segments_processed = 0
+        total_segments = sum(len(segment.points) - 1 for track in gpx.tracks for segment in track.segments)
         
         logger.info("Starting route segment processing...")
         
         # Break the route into smaller segments
-        for track_idx, track in enumerate(gpx.tracks):
-            for segment_idx, segment in enumerate(track.segments):
-                # Split segment into smaller sub-segments
+        for track in gpx.tracks:
+            for segment in track.segments:
                 points = segment.points
                 for i in range(len(points) - 1):
-                    # Create a sub-segment between consecutive points
                     start_point = points[i]
                     end_point = points[i + 1]
                     
@@ -962,55 +1144,49 @@ def get_route_completion(filename):
                     segment_length = route_segment.length
                     total_distance += segment_length
                     
-                    logger.debug(f"Processing sub-segment {i} of segment {segment_idx} in track {track_idx}")
-                    logger.debug(f"Sub-segment length: {segment_length * 111:.2f}km")
-                    
                     try:
-                        # Check if the sub-segment intersects with completed activities
                         intersects = route_segment.intersects(activity_map)
-                        logger.debug(f"Sub-segment intersects with activities: {intersects}")
                         
                         if intersects:
-                            # Calculate percentage of sub-segment that's been completed
                             intersection = route_segment.intersection(activity_map)
                             intersection_length = intersection.length if hasattr(intersection, 'length') else 0
                             completion_ratio = intersection_length / segment_length
-                            logger.debug(f"Sub-segment intersection length: {intersection_length * 111:.2f}km")
-                            logger.debug(f"Sub-segment completion ratio: {completion_ratio:.2%}")
                             
-                            if completion_ratio > 0.9:  # Consider it complete if 90% is done
-                                logger.debug(f"Sub-segment marked as completed")
+                            if completion_ratio > 0.9:
                                 completed_segments.append({
                                     "coordinates": coords,
                                     "completion": 1.0
                                 })
                                 completed_distance += segment_length
                             else:
-                                logger.debug(f"Sub-segment partially completed: {completion_ratio:.2%}")
                                 incomplete_segments.append({
                                     "coordinates": coords,
                                     "completion": completion_ratio
                                 })
                                 completed_distance += (segment_length * completion_ratio)
                         else:
-                            logger.debug(f"Sub-segment has no intersection with activities")
                             incomplete_segments.append({
                                 "coordinates": coords,
                                 "completion": 0.0
                             })
                     except Exception as e:
-                        logger.error(f"Error processing sub-segment: {str(e)}", exc_info=True)
+                        logger.error(f"Error processing segment: {str(e)}")
                         incomplete_segments.append({
                             "coordinates": coords,
                             "completion": 0.0
                         })
+                    
+                    segments_processed += 1
+                    if segments_processed % 100 == 0:  # Log progress every 100 segments
+                        logger.info(f"Processed {segments_processed}/{total_segments} segments")
         
         # Calculate total completion
         total_completion = completed_distance / total_distance if total_distance > 0 else 0
         
-        logger.info(f"Route processing complete:")
+        # Log final summary
+        logger.info(f"Route processing summary:")
+        logger.info(f"Total segments: {total_segments}")
         logger.info(f"Completed segments: {len(completed_segments)}")
-        logger.info(f"Incomplete segments: {len(incomplete_segments)}")
         logger.info(f"Total distance: {total_distance * 111:.2f}km")
         logger.info(f"Completed distance: {completed_distance * 111:.2f}km")
         logger.info(f"Total completion: {total_completion:.2%}")

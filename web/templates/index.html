@@ -87,7 +87,7 @@
                             {% if 'strava_token' in session %}
                             <label class="flex items-center">
                                 <input type="checkbox" name="excludeCompleted" class="rounded text-blue-600">
-                                <span class="ml-2 text-gray-700">Exclude completed Strava segments</span>
+                                <span class="ml-2 text-gray-700">Exclude completed roads</span>
                             </label>
                             {% endif %}
                         </div>
@@ -131,10 +131,7 @@
                         <h3 class="text-lg font-medium text-gray-900">Route Map</h3>
                         {% if 'strava_token' in session %}
                         <div class="flex items-center space-x-2">
-                            <label class="flex items-center text-sm">
-                                <input type="checkbox" id="showSegments" class="rounded text-orange-500 mr-2">
-                                Show Strava Segments
-                            </label>
+                            <!-- Removed Show Strava Segments checkbox -->
                         </div>
                         {% endif %}
                     </div>

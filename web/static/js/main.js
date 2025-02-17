@@ -4,7 +4,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const result = document.getElementById('result');
     const resultContent = document.getElementById('resultContent');
     const mapContainer = document.getElementById('mapContainer');
-    const showSegmentsCheckbox = document.getElementById('showSegments');
     
     let map = null;
     let routeLayer = null;
@@ -37,66 +36,10 @@ document.addEventListener('DOMContentLoaded', function() {
             attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         }).addTo(map);
 
-        // Initialize layers with their respective panes
+        // Initialize layers with their respective panes but don't add to map yet
         activitiesLayer = L.featureGroup([], { pane: 'activitiesPane' });
         routeLayer = L.featureGroup([], { pane: 'routePane' });
         segmentsLayer = L.featureGroup([], { pane: 'segmentsPane' });
-        
-        // Add layers to map
-        activitiesLayer.addTo(map);
-        routeLayer.addTo(map);
-        segmentsLayer.addTo(map);
-    }
-
-    function displaySegments(bounds) {
-        if (!showSegmentsCheckbox) return;
-
-        fetch(`/strava/segments?bounds=${JSON.stringify(bounds)}`)
-            .then(response => response.json())
-            .then(data => {
-                segmentsLayer.clearLayers();
-
-                if (!data.segments) return;
-
-                data.segments.forEach(segment => {
-                    const line = L.polyline(segment.points, {
-                        color: segment.completed ? '#22c55e' : '#f97316',
-                        weight: 4,
-                        opacity: 0.7
-                    });
-
-                    const popup = L.popup().setContent(`
-                        <div class="text-sm">
-                            <p class="font-medium">${segment.name}</p>
-                            <p class="text-gray-600">Distance: ${(segment.distance / 1000).toFixed(1)}km</p>
-                            <p class="text-gray-600">Elevation: ${segment.total_elevation_gain}m</p>
-                            ${segment.completed ? '<p class="text-green-600">✓ Completed</p>' : ''}
-                        </div>
-                    `);
-
-                    line.bindPopup(popup);
-                    line.addTo(segmentsLayer);
-                });
-            })
-            .catch(error => {
-                console.error('Error loading segments:', error);
-            });
-    }
-
-    if (showSegmentsCheckbox) {
-        showSegmentsCheckbox.addEventListener('change', function() {
-            segmentsLayer.clearLayers();
-            if (this.checked && map) {
-                const bounds = map.getBounds();
-                const boundingBox = {
-                    minLat: bounds.getSouth(),
-                    maxLat: bounds.getNorth(),
-                    minLng: bounds.getWest(),
-                    maxLng: bounds.getEast()
-                };
-                displaySegments(boundingBox);
-            }
-        });
     }
 
     function displayRoute(filename) {
@@ -157,11 +100,6 @@ document.addEventListener('DOMContentLoaded', function() {
                         padding: [50, 50],
                         maxZoom: 15
                     });
-
-                    // Display segments if checkbox is checked
-                    if (showSegmentsCheckbox && showSegmentsCheckbox.checked) {
-                        displaySegments(bounds);
-                    }
                 }, 100);
 
                 // Now try to fetch completion data
@@ -219,25 +157,17 @@ document.addEventListener('DOMContentLoaded', function() {
 
                         // Handle route segments
                         if (completionData.incomplete_segments.length > 0 || completionData.completed_segments.length > 0) {
-                            console.log('Updating route with completion data');
+                            console.info('Updating route with completion data');
                             
                             // Clear existing layers
                             routeLayer.clearLayers();
                             segmentsLayer.clearLayers();
 
-                            // Log the current state of layers
-                            console.log('Layer status after clearing:');
-                            console.log('- Route layer empty:', routeLayer.getLayers().length === 0);
-                            console.log('- Segments layer empty:', segmentsLayer.getLayers().length === 0);
-                            
                             // Process incomplete segments
-                            console.log(`Processing ${completionData.incomplete_segments.length} incomplete segments`);
-                            completionData.incomplete_segments.forEach((segment, index) => {
-                                console.log(`Adding incomplete segment ${index + 1}:`, JSON.stringify(segment.coordinates));
-                                if (!segment.coordinates || segment.coordinates.length < 2) {
-                                    console.error(`Invalid coordinates for incomplete segment ${index + 1}`);
-                                    return;
-                                }
+                            console.info(`Processing ${completionData.incomplete_segments.length} incomplete segments and ${completionData.completed_segments.length} completed segments`);
+                            
+                            completionData.incomplete_segments.forEach(segment => {
+                                if (!segment.coordinates || segment.coordinates.length < 2) return;
                                 
                                 // Fix coordinate order: Convert from [lng, lat] to [lat, lng]
                                 const correctedCoords = segment.coordinates.map(coord => [coord[1], coord[0]]);
@@ -250,18 +180,11 @@ document.addEventListener('DOMContentLoaded', function() {
                                     interactive: true
                                 });
                                 line.addTo(segmentsLayer);
-                                
-                                console.log(`Added incomplete segment ${index + 1} to segments layer with corrected coordinates:`, correctedCoords);
                             });
                             
                             // Process complete segments
-                            console.log(`Processing ${completionData.completed_segments.length} completed segments`);
-                            completionData.completed_segments.forEach((segment, index) => {
-                                console.log(`Adding completed segment ${index + 1}:`, JSON.stringify(segment.coordinates));
-                                if (!segment.coordinates || segment.coordinates.length < 2) {
-                                    console.error(`Invalid coordinates for completed segment ${index + 1}`);
-                                    return;
-                                }
+                            completionData.completed_segments.forEach(segment => {
+                                if (!segment.coordinates || segment.coordinates.length < 2) return;
                                 
                                 // Fix coordinate order: Convert from [lng, lat] to [lat, lng]
                                 const correctedCoords = segment.coordinates.map(coord => [coord[1], coord[0]]);
@@ -274,8 +197,6 @@ document.addEventListener('DOMContentLoaded', function() {
                                     interactive: true
                                 });
                                 line.addTo(segmentsLayer);
-                                
-                                console.log(`Added completed segment ${index + 1} to segments layer with corrected coordinates:`, correctedCoords);
                             });
 
                             // Ensure proper layer order
@@ -291,16 +212,13 @@ document.addEventListener('DOMContentLoaded', function() {
                             map.invalidateSize();
                             map._onResize();
 
-                            // Log final status
-                            console.log('Final layer visibility check:');
-                            console.log('- Activities layer visible:', activitiesLayer.getLayers().length > 0);
-                            console.log('- Route layer visible:', routeLayer.getLayers().length > 0);
-                            console.log('- Segments layer visible:', segmentsLayer.getLayers().length > 0);
-                            console.log('- Segments coordinates sample:', 
-                                segmentsLayer.getLayers().length > 0 ? 
-                                segmentsLayer.getLayers()[0].getLatLngs() : 'No segments');
+                            console.info('Layers updated:', {
+                                activities: activitiesLayer.getLayers().length,
+                                route: routeLayer.getLayers().length,
+                                segments: segmentsLayer.getLayers().length
+                            });
                         } else {
-                            console.log('No segment data available, showing original route in red');
+                            console.info('No segment data available, showing original route in red');
                             routeLayer.clearLayers();
                             L.geoJSON(data.geojson, {
                                 style: {
@@ -318,13 +236,33 @@ document.addEventListener('DOMContentLoaded', function() {
                         // Add layer control
                         const overlayMaps = {
                             "Route": routeLayer,
-                            "Activities": activitiesLayer
+                            "Activities": activitiesLayer,
+                            "Completed": segmentsLayer
                         };
 
                         if (map._layers_control) {
                             map._layers_control.remove();
                         }
-                        map._layers_control = L.control.layers(null, overlayMaps).addTo(map);
+                        map._layers_control = L.control.layers(null, overlayMaps, {
+                            collapsed: false,
+                            position: 'topright'
+                        }).addTo(map);
+
+                        // Add original route to route layer
+                        routeLayer.clearLayers();
+                        L.geoJSON(data.geojson, {
+                            style: {
+                                color: '#2563eb',  // blue
+                                weight: 5,
+                                opacity: 1.0,
+                                pane: 'routePane'
+                            }
+                        }).addTo(routeLayer);
+
+                        // Ensure all layers are visible by default
+                        map.addLayer(routeLayer);
+                        map.addLayer(activitiesLayer);
+                        map.addLayer(segmentsLayer);
 
                         // Force a map update
                         map.invalidateSize();
@@ -442,38 +380,70 @@ document.addEventListener('DOMContentLoaded', function() {
         resultContent.innerHTML = '';
         
         const sessionId = generateSessionId();
+        console.log('Starting route generation with session:', sessionId);
         
         // Set up SSE for progress updates
         const eventSource = new EventSource(`/progress/${sessionId}`);
         
         eventSource.onmessage = function(event) {
-            const data = JSON.parse(event.data);
-            
-            if (data.type === 'progress') {
-                updateProgress(data);
-            } else if (data.type === 'error') {
-                eventSource.close();
-                loading.classList.add('hidden');
-                resultContent.innerHTML = `
-                    <div class="bg-red-50 border border-red-200 rounded-md p-4">
-                        <div class="flex">
-                            <div class="flex-shrink-0">
-                                <svg class="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
-                                    <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
-                                </svg>
-                            </div>
-                            <div class="ml-3">
-                                <p class="text-sm font-medium text-red-800">
-                                    ${data.message}
-                                </p>
+            try {
+                const data = JSON.parse(event.data);
+                console.log('Progress update:', data);
+                
+                if (data.type === 'progress') {
+                    updateProgress(data);
+                } else if (data.type === 'error') {
+                    console.error('Server error:', data.message);
+                    eventSource.close();
+                    loading.classList.add('hidden');
+                    resultContent.innerHTML = `
+                        <div class="bg-red-50 border border-red-200 rounded-md p-4">
+                            <div class="flex">
+                                <div class="flex-shrink-0">
+                                    <svg class="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
+                                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+                                    </svg>
+                                </div>
+                                <div class="ml-3">
+                                    <p class="text-sm font-medium text-red-800">
+                                        ${data.message}
+                                    </p>
+                                </div>
                             </div>
                         </div>
-                    </div>
-                `;
-                result.classList.remove('hidden');
-            } else if (data.type === 'done') {
+                    `;
+                    result.classList.remove('hidden');
+                } else if (data.type === 'done') {
+                    console.log('Processing complete');
+                    eventSource.close();
+                }
+            } catch (error) {
+                console.error('Error processing server message:', error, event.data);
                 eventSource.close();
             }
+        };
+
+        eventSource.onerror = function(error) {
+            console.error('EventSource error:', error);
+            eventSource.close();
+            loading.classList.add('hidden');
+            resultContent.innerHTML = `
+                <div class="bg-red-50 border border-red-200 rounded-md p-4">
+                    <div class="flex">
+                        <div class="flex-shrink-0">
+                            <svg class="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+                            </svg>
+                        </div>
+                        <div class="ml-3">
+                            <p class="text-sm font-medium text-red-800">
+                                Connection error. Please try again.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            `;
+            result.classList.remove('hidden');
         };
         
         // Get form data
@@ -484,11 +454,15 @@ document.addEventListener('DOMContentLoaded', function() {
             prune: document.querySelector('input[name="prune"]').checked,
             simplify_gpx: document.querySelector('input[name="simplifyGpx"]').checked,
             feature_deadend: document.querySelector('input[name="featureDeadend"]').checked,
+            exclude_completed: document.querySelector('input[name="excludeCompleted"]')?.checked || false,
             session_id: sessionId
         };
-
+        
+        console.log('Form data:', formData);
+        
         try {
             // Send request to generate route
+            console.log('Sending route generation request');
             const response = await fetch('/generate', {
                 method: 'POST',
                 headers: {
@@ -498,6 +472,7 @@ document.addEventListener('DOMContentLoaded', function() {
             });
 
             const data = await response.json();
+            console.log('Received response:', data);
 
             if (!response.ok) {
                 throw new Error(data.error || 'Failed to generate route');
@@ -534,6 +509,7 @@ document.addEventListener('DOMContentLoaded', function() {
             // Display route on map
             displayRoute(data.gpx_file);
         } catch (error) {
+            console.error('Error in route generation:', error);
             // Show error message
             resultContent.innerHTML = `
                 <div class="bg-red-50 border border-red-200 rounded-md p-4">

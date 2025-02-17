@@ -758,10 +758,11 @@ class Burbing:
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f'burb_track_{self.name}_{timestamp}.gpx'
 
+        log.info('Saving GPX track to %s', filename)
         with open(filename, 'w') as f:
             f.write(data)
 
-        return
+        return filename
 
     pass
 

@@ -133,3 +133,4 @@ dmypy.json
 web/activities/*
 web/cache/*
 web/uploads/*
+cache/*
