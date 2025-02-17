@@ -409,7 +409,7 @@ class Burbing:
         try:
             # Get node coordinates
             u_coords = (self.g.nodes[u]['x'], self.g.nodes[u]['y'])
-            v_coords = (self.g.nodes[u]['x'], self.g.nodes[u]['y'])
+            v_coords = (self.g.nodes[v]['x'], self.g.nodes[v]['y'])
         except (KeyError, AttributeError) as e:
             log.error(f"Missing node coordinates for edge {edge}: {str(e)}")
             return None
@@ -670,7 +670,6 @@ class Burbing:
         data = gpx.to_xml()
         with open(filename, 'w') as f:
             f.write(data)
-            pass
 
         return
 
@@ -756,7 +755,8 @@ class Burbing:
             gpx.simplify()
 
         data = gpx.to_xml()
-        filename = f'burb_track_{self.name}.gpx'
+        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f'burb_track_{self.name}_{timestamp}.gpx'
 
         with open(filename, 'w') as f:
             f.write(data)
