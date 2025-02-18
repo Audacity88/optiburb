@@ -126,15 +126,11 @@ def strava_login():
     # Generate a session ID for progress tracking
     session['strava_fetch_id'] = str(uuid.uuid4())
     
-    # Build the redirect URI based on the current request
-    redirect_uri = request.host_url.rstrip('/') + url_for('auth.strava_callback')
-    encoded_redirect_uri = quote(redirect_uri)
-    
     auth_url = (
         "https://www.strava.com/oauth/authorize?"
         f"client_id={settings.STRAVA_CLIENT_ID}&"
         "response_type=code&"
-        f"redirect_uri={encoded_redirect_uri}&"
+        f"redirect_uri={quote(settings.STRAVA_REDIRECT_URI)}&"
         "approval_prompt=force&"
         "scope=activity:read_all"
     )

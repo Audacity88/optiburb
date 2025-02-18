@@ -22,6 +22,7 @@ import argparse
 import gpxpy
 import gpxpy.gpx
 import datetime
+from shapely.geometry import LineString
 
 # Configure logging to always show warnings and errors
 logging.basicConfig(
@@ -433,7 +434,14 @@ class Burbing:
     ##
     ##
     def determine_nodes(self):
-        """Process the graph and prepare it for finding an Eulerian circuit."""
+        """Determine nodes that need to be connected to balance the graph."""
+        # Add debug check at the start
+        self._debug_edge_attributes()
+        
+        edges_added = 0
+        max_iterations = 100  # Prevent infinite loops
+        iteration = 0
+        
         log.info('Processing directed graph')
 
         # Store the original directed graph
@@ -547,34 +555,64 @@ class Burbing:
     def _add_path_as_edge(self, source, target, path):
         """Helper method to add a new edge that follows an existing path."""
         if len(path) < 2:
-            return
-            
-        # Calculate total length along the path
+            log.error(f"Path between {source}-{target} is too short")
+            return False
+        
+        # Check if edge already exists
+        if self.g_working.has_edge(source, target):
+            log.info(f"Edge {source}-{target} already exists, skipping")
+            return False
+        
+        # For all paths, calculate total length and collect coordinates
         length = 0
         coords = []
         
+        # Collect all coordinates and calculate total length
         for i in range(len(path) - 1):
             u, v = path[i], path[i + 1]
-            edge_data = self.g_working.get_edge_data(u, v)
-            if edge_data:
-                length += edge_data.get('length', 0)
-                if 'geometry' in edge_data and edge_data['geometry'] is not None:
-                    if not coords:  # First segment
-                        coords.extend(list(edge_data['geometry'].coords))
-                    else:  # Subsequent segments - skip first point to avoid duplication
-                        coords.extend(list(edge_data['geometry'].coords)[1:])
+            if not self.g_working.has_edge(u, v):
+                log.error(f"Missing edge {u}-{v} in working graph")
+                return False
+            
+            edge_data = self.g_working[u][v]
+            if isinstance(edge_data, LineString):
+                # Convert LineString to proper edge attributes
+                geometry = edge_data
+                length += geometry.length
+                coords.extend(list(geometry.coords))
+            else:
+                # Normal dictionary attributes
+                geometry = edge_data.get('geometry')
+                if geometry is None:
+                    # Create straight line geometry if missing
+                    try:
+                        u_coords = (self.g_working.nodes[u]['x'], self.g_working.nodes[u]['y'])
+                        v_coords = (self.g_working.nodes[v]['x'], self.g_working.nodes[v]['y'])
+                        geometry = LineString([u_coords, v_coords])
+                        # Calculate Euclidean distance for length
+                        segment_length = self.distance(u_coords, v_coords)
+                        length += segment_length
+                        coords.extend([u_coords, v_coords])
+                        log.warning(f"Created straight line geometry for edge {u}-{v}")
+                    except (KeyError, AttributeError) as e:
+                        log.error(f"Cannot create straight line geometry for edge {u}-{v}: {str(e)}")
+                        return False
+                else:
+                    length += edge_data.get('length', geometry.length)
+                    coords.extend(list(geometry.coords))
         
-        # Create edge data
-        data = {
-            'length': length,
-            'augmented': True,
-            'path': path,
-            'geometry': shapely.geometry.LineString(coords) if coords else None
-        }
-        
-        # Add the edge
-        self.g_working.add_edge(source, target, **data)
-        log.info(f"Added balancing edge {source}-{target} with length {length:.2f}")
+        # Create the new edge with proper attributes
+        if coords:
+            # For MultiDiGraph, we need to pass the data as kwargs
+            edge_data = {
+                'geometry': LineString(coords),
+                'length': length,
+                'is_composite': True  # Mark this as a composite edge
+            }
+            self.g_working.add_edge(source, target, **edge_data)
+            log.debug(f"Added edge {source}-{target} with length {length}")
+            return True
+        return False
 
     ##
     ##
@@ -898,18 +936,41 @@ class Burbing:
         for i in range(len(path) - 1):
             u, v = path[i], path[i + 1]
             
-            
-            # Try to get edge data and geometry
-            edge_data = g.get_edge_data(u, v, 0)
-            if edge_data is None:
-                log.warning(f"No edge data found for {u}-{v}, checking reverse direction")
-                edge_data = g.get_edge_data(v, u, 0)
+            # Try to get edge data in both directions
+            edge_data = None
+            for source, target in [(u, v), (v, u)]:
+                temp_data = g.get_edge_data(source, target)
+                if temp_data:
+                    # Handle multiple edges between same nodes
+                    if isinstance(temp_data, dict):
+                        if 'geometry' in temp_data and temp_data['geometry'] is not None:
+                            edge_data = temp_data
+                            break
+                    else:
+                        # Find first edge with valid geometry
+                        for key in temp_data:
+                            if 'geometry' in temp_data[key] and temp_data[key]['geometry'] is not None:
+                                edge_data = temp_data[key]
+                                break
+                    if edge_data:
+                        break
             
             if edge_data and 'geometry' in edge_data and edge_data['geometry'] is not None:
                 try:
                     # Get the geometry coordinates
                     geom = edge_data['geometry']
                     coords = list(geom.coords)
+                    
+                    # Validate coordinates
+                    if not coords or len(coords) < 2:
+                        raise ValueError(f"Invalid geometry coordinates for edge {u}-{v}")
+                    
+                    # Verify coordinate values
+                    for x, y in coords:
+                        if not (isinstance(x, (int, float)) and isinstance(y, (int, float))):
+                            raise ValueError(f"Invalid coordinate types in edge {u}-{v}")
+                        if abs(x) > 180 or abs(y) > 90:
+                            raise ValueError(f"Coordinate values out of range in edge {u}-{v}")
                     
                     # Check if we need to reverse the coordinates
                     if i > 0 and len(all_coords) > 0:
@@ -922,8 +983,17 @@ class Burbing:
                         if end_dist < start_dist:
                             coords = coords[::-1]
                     
+                    # Verify continuity with previous segment
+                    if i > 0 and len(all_coords) > 0:
+                        gap = self.distance(all_coords[-1], coords[0])
+                        if gap > 1e-5:  # Small tolerance for floating point comparison
+                            log.warning(f"Gap detected in path at edge {u}-{v}: {gap}")
+                            # Try to interpolate the gap
+                            mid_point = ((all_coords[-1][0] + coords[0][0])/2, 
+                                       (all_coords[-1][1] + coords[0][1])/2)
+                            all_coords.append(mid_point)
+                    
                     # Add all points except the first if this isn't the first segment
-                    # (to avoid duplicating points)
                     if i > 0 and len(all_coords) > 0:
                         all_coords.extend(coords[1:])
                     else:
@@ -944,6 +1014,27 @@ class Burbing:
             log.error("No coordinates generated for path")
             return None
             
+        # Validate final path
+        if len(all_coords) < 2:
+            log.error("Path has fewer than 2 points")
+            return None
+            
+        # Verify the total path length is reasonable
+        try:
+            total_length = sum(self.distance(all_coords[i], all_coords[i+1]) 
+                             for i in range(len(all_coords)-1))
+            straight_length = self.distance(all_coords[0], all_coords[-1])
+            
+            if total_length < straight_length * 0.9:
+                log.error(f"Path length ({total_length}) is too short compared to straight line ({straight_length})")
+                return None
+            if total_length > straight_length * 3:
+                log.error(f"Path length ({total_length}) is too long compared to straight line ({straight_length})")
+                return None
+        except Exception as e:
+            log.error(f"Error validating path length: {str(e)}")
+            return None
+            
         # Log summary of geometry usage
         if straight_line_segments > 0:
             log.warning(f"Path geometry summary:")
@@ -953,25 +1044,46 @@ class Burbing:
             log.warning(f"  - {straight_line_segments} segments ({(straight_line_segments/total_segments)*100:.1f}%) are using straight lines!")
         
         try:
-            return shapely.geometry.LineString(all_coords)
-        except (ValueError, TypeError) as e:
+            linestring = shapely.geometry.LineString(all_coords)
+            if not linestring.is_valid:
+                log.error("Generated LineString is not valid")
+                return None
+            return linestring
+        except Exception as e:
             log.error(f"Failed to create LineString from coordinates: {str(e)}")
             return None
 
-    def _add_straight_line_segment(self, g, u, v, coords_list, segment_index):
-        """Helper method to add a straight line segment between two nodes."""
+    def _add_straight_line_segment(self, g, u, v, all_coords, segment_index):
+        """Helper method to add a straight line segment between nodes."""
         try:
+            # Get node coordinates
             u_coords = (g.nodes[u]['x'], g.nodes[u]['y'])
             v_coords = (g.nodes[v]['x'], g.nodes[v]['y'])
             
-            # Only add the first point if this is the first segment or coords_list is empty
-            if segment_index == 0 or not coords_list:
-                coords_list.append(u_coords)
-            coords_list.append(v_coords)
+            # Validate coordinates
+            for x, y in [u_coords, v_coords]:
+                if not (isinstance(x, (int, float)) and isinstance(y, (int, float))):
+                    raise ValueError(f"Invalid coordinate types for node")
+                if abs(x) > 180 or abs(y) > 90:
+                    raise ValueError(f"Coordinate values out of range for node")
             
-            log.warning(f"Added straight line segment for {u}-{v} - STRAIGHT LINE WILL BE VISIBLE IN ROUTE")
-        except (KeyError, AttributeError) as e:
-            log.error(f"Cannot create straight line segment for {u}-{v}: {str(e)}")
+            # Add coordinates based on segment position
+            if segment_index > 0 and len(all_coords) > 0:
+                # Check for gaps and interpolate if needed
+                gap = self.distance(all_coords[-1], u_coords)
+                if gap > 1e-5:
+                    mid_point = ((all_coords[-1][0] + u_coords[0])/2, 
+                               (all_coords[-1][1] + u_coords[1])/2)
+                    all_coords.append(mid_point)
+                all_coords.append(u_coords)
+                all_coords.append(v_coords)
+            else:
+                all_coords.extend([u_coords, v_coords])
+                
+            log.warning(f"Added straight line segment for {u}-{v}")
+            
+        except Exception as e:
+            log.error(f"Error creating straight line segment {u}-{v}: {str(e)}")
 
     ##
     ##
@@ -1456,6 +1568,144 @@ class Burbing:
         
         # Normalize to 0-360
         return (bearing + 360) % 360
+
+    def _find_road_following_path(self, g, source, target, max_attempts=3):
+        """Find a path between nodes that follows the road network with valid geometry."""
+        log.info(f"Finding road-following path from {source} to {target}")
+        
+        # Get node coordinates
+        try:
+            source_coords = (g.nodes[source]['x'], g.nodes[source]['y'])
+            target_coords = (g.nodes[target]['x'], g.nodes[target]['y'])
+            straight_line_dist = self.distance(source_coords, target_coords)
+            log.info(f"Straight line distance: {straight_line_dist}")
+        except KeyError as e:
+            log.error(f"Missing coordinates for nodes: {str(e)}")
+            return None
+        
+        # Try different path-finding strategies
+        for attempt in range(max_attempts):
+            try:
+                if attempt == 0:
+                    # First try: shortest path by length
+                    path = nx.shortest_path(g, source, target, weight='length')
+                    log.info(f"Attempt {attempt + 1}: Found shortest path by length with {len(path)} nodes")
+                elif attempt == 1:
+                    # Second try: shortest path by hops (number of edges)
+                    path = nx.shortest_path(g, source, target)
+                    log.info(f"Attempt {attempt + 1}: Found shortest path by hops with {len(path)} nodes")
+                else:
+                    # Last try: Dijkstra with modified weights to prefer roads with geometry
+                    temp_graph = g.copy()
+                    for u, v, data in temp_graph.edges(data=True):
+                        # Penalize edges without geometry
+                        if 'geometry' not in data or data['geometry'] is None:
+                            data['modified_length'] = data.get('length', 1) * 2
+                        else:
+                            data['modified_length'] = data.get('length', 1)
+                    path = nx.shortest_path(temp_graph, source, target, weight='modified_length')
+                    log.info(f"Attempt {attempt + 1}: Found path with geometry preference, {len(path)} nodes")
+                
+                # Validate the path
+                total_length = 0
+                has_valid_geometry = True
+                prev_end = None
+                
+                for i in range(len(path) - 1):
+                    u, v = path[i], path[i + 1]
+                    
+                    # Try both directions for the edge
+                    edge_data = g.get_edge_data(u, v) or g.get_edge_data(v, u)
+                    if not edge_data:
+                        log.error(f"No edge data found for {u}-{v}")
+                        has_valid_geometry = False
+                        break
+                    
+                    # Handle multiple edges between same nodes
+                    if not isinstance(edge_data, dict):
+                        # Find first edge with valid geometry
+                        for key in edge_data:
+                            if 'geometry' in edge_data[key] and edge_data[key]['geometry'] is not None:
+                                edge_data = edge_data[key]
+                                break
+                        if not isinstance(edge_data, dict):
+                            log.error(f"No valid edge data found for {u}-{v}")
+                            has_valid_geometry = False
+                            break
+                    
+                    # Check geometry
+                    if 'geometry' not in edge_data or edge_data['geometry'] is None:
+                        # Try to create straight line geometry
+                        try:
+                            u_coords = (g.nodes[u]['x'], g.nodes[u]['y'])
+                            v_coords = (g.nodes[v]['x'], g.nodes[v]['y'])
+                            edge_data['geometry'] = shapely.geometry.LineString([u_coords, v_coords])
+                            log.warning(f"Created straight line geometry for edge {u}-{v}")
+                        except (KeyError, AttributeError) as e:
+                            log.error(f"Cannot create straight line geometry for edge {u}-{v}: {str(e)}")
+                            has_valid_geometry = False
+                            break
+                    
+                    # Check geometry continuity
+                    curr_coords = list(edge_data['geometry'].coords)
+                    if not curr_coords or len(curr_coords) < 2:
+                        log.error(f"Invalid geometry coordinates for edge {u}-{v}")
+                        has_valid_geometry = False
+                        break
+                    
+                    # Check if we need to reverse coordinates
+                    if g.get_edge_data(v, u) == edge_data:
+                        curr_coords = curr_coords[::-1]
+                    
+                    # Check continuity with previous segment
+                    if prev_end is not None:
+                        gap = self.distance(prev_end, curr_coords[0])
+                        if gap > 1e-5:
+                            log.error(f"Discontinuity in path at edge {u}-{v}: gap={gap}")
+                            has_valid_geometry = False
+                            break
+                    
+                    prev_end = curr_coords[-1]
+                    total_length += edge_data.get('length', 0)
+                
+                if not has_valid_geometry:
+                    log.warning(f"Attempt {attempt + 1}: Path has invalid geometry")
+                    continue
+                
+                # Verify total length is reasonable
+                if straight_line_dist > 1e-5:  # Only check if points are not too close
+                    if total_length < straight_line_dist * 0.9:
+                        log.error(f"Path length ({total_length}) is too short compared to straight line distance ({straight_line_dist})")
+                        continue
+                    if total_length > straight_line_dist * 3:
+                        log.error(f"Path length ({total_length}) is too long compared to straight line distance ({straight_line_dist})")
+                        continue
+                
+                log.info(f"Found valid path with length {total_length}")
+                return path
+                
+            except nx.NetworkXNoPath:
+                log.error(f"No path found on attempt {attempt + 1}")
+                continue
+            except Exception as e:
+                log.error(f"Error finding path on attempt {attempt + 1}: {str(e)}")
+                continue
+        
+        log.error(f"Failed to find valid path after {max_attempts} attempts")
+        return None
+
+    def _debug_edge_attributes(self):
+        """Debug helper to identify edges with incorrect attribute format."""
+        for u, v, data in self.g_working.edges(data=True):
+            if not isinstance(data, dict):
+                log.error(f"Edge {u}-{v} has non-dictionary attributes: {type(data)}")
+                # Convert LineString to proper edge attributes if needed
+                if isinstance(data, LineString):
+                    self.g_working[u][v] = {
+                        'geometry': data,
+                        'length': data.length
+                    }
+                    log.info(f"Fixed edge {u}-{v} attributes")
 
     pass
 

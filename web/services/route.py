@@ -307,7 +307,7 @@ class RouteService:
                                 'bearing': bearing
                             })
                             direction_count += 1
-                            logger.info(f"Added direction marker at edge {i} midpoint with bearing {bearing}°")
+                            # logger.info(f"Added direction marker at edge {i} midpoint with bearing {bearing}°")
                     
                     if not coordinates:
                         logger.warning(f"No coordinates found in track segment")
@@ -343,7 +343,7 @@ class RouteService:
                             }
                         }
                         features.append(marker_feature)
-                        logger.debug(f"Added direction marker feature with bearing {direction['bearing']}°")
+                        # logger.debug(f"Added direction marker feature with bearing {direction['bearing']}°")
             
             logger.info(f"Total direction markers found: {direction_count}")
             

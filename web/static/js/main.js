@@ -176,7 +176,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     const bearing = feature.properties.bearing;
                     const coords = feature.geometry.coordinates;
                     
-                    console.log(`Adding direction tick ${index + 1}:`, {coords, bearing});
+                    // console.log(`Adding direction tick ${index + 1}:`, {coords, bearing});
                     
                     // Convert from [lng, lat] to [lat, lng] for Leaflet
                     const center = [coords[1], coords[0]];
