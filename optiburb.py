@@ -805,6 +805,9 @@ class Burbing:
         log.info('fetching OSM data bounded by polygon')
         self.g = osmnx.graph_from_polygon(self.region, network_type='bike', simplify=False, custom_filter=self.custom_filter, retain_all=True)
         
+        # Store original graph immediately after creation
+        self.g_original = self.g.copy()
+        
         # Get nodes and edges as GeoDataFrames with explicit geometry
         nodes, edges = osmnx.utils_graph.graph_to_gdfs(self.g, nodes=True, edges=True, node_geometry=True, fill_edge_geometry=True)
         
@@ -853,9 +856,6 @@ class Burbing:
             edges_processed = 0
             edges_removed = 0
             total_edges = len(self.g.edges())
-            
-            # Store original graph for finding connecting edges later
-            self.g_original = self.g.copy()
             
             # Keep track of edges to remove
             edges_to_remove = []
