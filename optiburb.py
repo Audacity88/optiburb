@@ -413,6 +413,13 @@ class Burbing:
         # Convert to undirected for processing
         self.g = self.g_directed.to_undirected()
         
+        # Ensure coordinates are preserved in the undirected graph
+        for node in self.g.nodes():
+            if node in self.node_coords:
+                x, y = self.node_coords[node]
+                self.g.nodes[node]['x'] = x
+                self.g.nodes[node]['y'] = y
+        
         # Find connected components
         components = list(nx.connected_components(self.g))
         if len(components) > 1:
@@ -444,9 +451,15 @@ class Burbing:
         
         self.print_edges(self.g)
         
+        # Create augmented graph and ensure coordinates are preserved
         self.g_augmented = self.g.copy()
+        for node in self.g_augmented.nodes():
+            if node in self.node_coords:
+                x, y = self.node_coords[node]
+                self.g_augmented.nodes[node]['x'] = x
+                self.g_augmented.nodes[node]['y'] = y
+        
         self.odd_nodes = self.find_odd_nodes()
-
         return
 
 
@@ -545,17 +558,20 @@ class Burbing:
     ##
     ##
     def determine_circuit(self):
-
         odd_matching = nx.algorithms.max_weight_matching(self.g_odd_nodes, True)
-
         log.info('augment original graph with %s pairs', len(odd_matching))
-
+        
         self.augment_graph(odd_matching)
-
+        
+        # Ensure coordinates are preserved in augmented graph after augmentation
+        for node in self.g_augmented.nodes():
+            if node in self.node_coords:
+                x, y = self.node_coords[node]
+                self.g_augmented.nodes[node]['x'] = x
+                self.g_augmented.nodes[node]['y'] = y
+        
         start_node = self.get_start_node(self.g, self.start)
-
         self.euler_circuit = list(nx.eulerian_circuit(self.g_augmented, source=start_node))
-
         return
 
     ##
@@ -796,32 +812,29 @@ class Burbing:
         if 'geometry' not in nodes.columns:
             log.error("Node geometry is missing from GeoDataFrame")
             raise ValueError("Node geometry is missing")
-            
-        # Extract coordinates from node geometries
-        nodes['x'] = nodes.geometry.x
-        nodes['y'] = nodes.geometry.y
         
-        # Verify coordinates were extracted
-        missing_coords = nodes[nodes['x'].isna() | nodes['y'].isna()]
-        if not missing_coords.empty:
-            log.warning(f"Found {len(missing_coords)} nodes with missing coordinates")
-            # Try to fix missing coordinates
-            for idx in missing_coords.index:
-                try:
-                    point = nodes.at[idx, 'geometry']
-                    nodes.at[idx, 'x'] = point.x
-                    nodes.at[idx, 'y'] = point.y
-                except Exception as e:
-                    log.error(f"Could not extract coordinates for node {idx}: {str(e)}")
+        # Create a dictionary to store node coordinates
+        self.node_coords = {}
+        
+        # Extract coordinates from node geometries and store them
+        for node_id, node_data in nodes.iterrows():
+            try:
+                point = node_data['geometry']
+                x, y = point.x, point.y
+                self.node_coords[node_id] = (x, y)
+                self.g.nodes[node_id]['x'] = x
+                self.g.nodes[node_id]['y'] = y
+            except Exception as e:
+                log.error(f"Could not extract coordinates for node {node_id}: {str(e)}")
         
         # Log coordinate statistics
+        nodes_with_coords = sum(1 for n in self.g.nodes if 'x' in self.g.nodes[n] and 'y' in self.g.nodes[n])
         log.info(f"Node coordinate statistics:")
-        log.info(f"  - Total nodes: {len(nodes)}")
-        log.info(f"  - Nodes with x coordinates: {nodes['x'].notna().sum()}")
-        log.info(f"  - Nodes with y coordinates: {nodes['y'].notna().sum()}")
+        log.info(f"  - Total nodes: {len(self.g.nodes)}")
+        log.info(f"  - Nodes with coordinates: {nodes_with_coords}")
         
-        # Recreate graph with coordinates
-        self.g = osmnx.graph_from_gdfs(nodes, edges)
+        if nodes_with_coords < len(self.g.nodes):
+            log.warning(f"Missing coordinates for {len(self.g.nodes) - nodes_with_coords} nodes")
         
         log.debug('original g=%s, g=%s', self.g, type(self.g))
         log.info('original nodes=%s, edges=%s', self.g.order(), self.g.size())
@@ -832,6 +845,9 @@ class Burbing:
             
             # Create a buffer around the completed area
             completed_area_buffer = self.completed_area.buffer(0.00015)  # ~15 meter buffer
+            if not completed_area_buffer.is_valid:
+                completed_area_buffer = completed_area_buffer.buffer(0)
+            
             log.info(f"Created completed area buffer: valid={completed_area_buffer.is_valid}, empty={completed_area_buffer.is_empty}, area={completed_area_buffer.area}")
             
             edges_processed = 0
@@ -844,29 +860,43 @@ class Burbing:
             # Keep track of edges to remove
             edges_to_remove = []
             
+            # Process edges in both directions
             for u, v, data in list(self.g.edges(data=True)):
                 edges_processed += 1
                 
                 try:
-                    if 'geometry' not in data:
-                        continue
-                        
-                    coords = data['geometry'].coords
-                    if len(coords) < 2:
-                        continue
-                        
-                    edge_line = shapely.geometry.LineString(coords)
-                    edge_buffer = edge_line.buffer(0.00005)  # ~5 meter buffer
+                    # Get edge geometry
+                    if 'geometry' in data and data['geometry'] is not None:
+                        edge_geom = data['geometry']
+                    else:
+                        # Create straight line geometry if none exists
+                        try:
+                            u_coords = self.node_coords[u]
+                            v_coords = self.node_coords[v]
+                            edge_geom = shapely.geometry.LineString([u_coords, v_coords])
+                        except (KeyError, AttributeError) as e:
+                            log.error(f"Cannot create geometry for edge {u}-{v}: {str(e)}")
+                            continue
+                    
+                    # Create buffer around edge
+                    edge_buffer = edge_geom.buffer(0.00005)  # ~5 meter buffer
+                    if not edge_buffer.is_valid:
+                        edge_buffer = edge_buffer.buffer(0)
                     
                     if edge_buffer.intersects(completed_area_buffer):
                         intersection = edge_buffer.intersection(completed_area_buffer)
+                        if not intersection.is_valid:
+                            intersection = intersection.buffer(0)
+                        
                         intersection_area = intersection.area if hasattr(intersection, 'area') else 0
-                        overlap_ratio = intersection_area / edge_buffer.area
+                        edge_area = edge_buffer.area if edge_buffer.area > 0 else 1e-10
+                        overlap_ratio = intersection_area / edge_area
                         
                         # If more than 30% completed, mark for removal
                         if overlap_ratio > 0.3:
                             edges_to_remove.append((u, v))
                             edges_removed += 1
+                            log.debug(f"Marking edge {u}-{v} for removal (overlap: {overlap_ratio:.2%})")
                     
                     # Only log progress every 500 edges
                     if edges_processed % 500 == 0:
@@ -877,21 +907,57 @@ class Burbing:
                     continue
             
             # Remove the completed edges
+            edges_actually_removed = 0
             for u, v in edges_to_remove:
                 if self.g.has_edge(u, v):
                     self.g.remove_edge(u, v)
+                    edges_actually_removed += 1
                 if self.g.has_edge(v, u):  # Remove reverse edge if it exists
                     self.g.remove_edge(v, u)
+                    edges_actually_removed += 1
             
             # Remove any isolated nodes that resulted from edge removal
+            original_node_count = self.g.number_of_nodes()
             self.g = osmnx.utils_graph.remove_isolated_nodes(self.g)
             
-            log.info(f"Completed road removal: processed {edges_processed} edges, removed {edges_removed} completed edges")
-            log.info(f"Remaining nodes={self.g.order()}, edges={self.g.size()}")
+            # Restore coordinates for remaining nodes
+            for node in self.g.nodes():
+                if node in self.node_coords:
+                    x, y = self.node_coords[node]
+                    self.g.nodes[node]['x'] = x
+                    self.g.nodes[node]['y'] = y
+            
+            nodes_removed = original_node_count - self.g.number_of_nodes()
+            
+            # Ensure coordinates are preserved after removing isolated nodes
+            nodes_with_coords = sum(1 for n in self.g.nodes if 'x' in self.g.nodes[n] and 'y' in self.g.nodes[n])
+            log.warning(f"Completed roads removal summary:")
+            log.warning(f"  - Edges processed: {edges_processed}")
+            log.warning(f"  - Edges marked for removal: {edges_removed}")
+            log.warning(f"  - Edges actually removed: {edges_actually_removed}")
+            log.warning(f"  - Nodes removed: {nodes_removed}")
+            log.warning(f"  - Remaining nodes: {len(self.g.nodes)}")
+            log.warning(f"  - Nodes with coordinates: {nodes_with_coords}")
+            
+            if nodes_with_coords < len(self.g.nodes):
+                log.warning(f"Missing coordinates for {len(self.g.nodes) - nodes_with_coords} nodes after processing")
 
         if options.simplify:
             log.info('simplifying graph')
             self.g = osmnx.simplification.simplify_graph(self.g, strict=False, remove_rings=False)
+            
+            # Restore coordinates after simplification
+            for node in self.g.nodes():
+                if node in self.node_coords:
+                    x, y = self.node_coords[node]
+                    self.g.nodes[node]['x'] = x
+                    self.g.nodes[node]['y'] = y
+            
+            # Ensure coordinates are preserved after simplification
+            nodes_with_coords = sum(1 for n in self.g.nodes if 'x' in self.g.nodes[n] and 'y' in self.g.nodes[n])
+            log.info(f"After simplification:")
+            log.info(f"  - Remaining nodes: {len(self.g.nodes)}")
+            log.info(f"  - Nodes with coordinates: {nodes_with_coords}")
 
         return
 
@@ -968,6 +1034,13 @@ class Burbing:
     def create_gpx_track(self, g, edges, simplify=False):
         # create GPX XML.
 
+        # Ensure coordinates are present in the graph
+        for node in g.nodes():
+            if node in self.node_coords and ('x' not in g.nodes[node] or 'y' not in g.nodes[node]):
+                x, y = self.node_coords[node]
+                g.nodes[node]['x'] = x
+                g.nodes[node]['y'] = y
+        
         stats_distance = 0.0
         stats_backtrack = 0.0
         stats_deadends = 0
