@@ -1,4 +1,53 @@
 document.addEventListener('DOMContentLoaded', function() {
+    // Check for Strava activity fetch progress
+    const urlParams = new URLSearchParams(window.location.search);
+    const fetchId = document.cookie.split('; ').find(row => row.startsWith('strava_fetch_id'))?.split('=')[1];
+    
+    if (fetchId) {
+        const progressModal = document.getElementById('stravaProgress');
+        const progressBar = document.getElementById('stravaProgressBar');
+        const progressStep = document.getElementById('stravaProgressStep');
+        const progressPercent = document.getElementById('stravaProgressPercent');
+        const progressMessage = document.getElementById('stravaProgressMessage');
+        
+        progressModal.classList.remove('hidden');
+        
+        // Set up SSE for progress updates
+        const eventSource = new EventSource(`/strava/fetch-progress/${fetchId}`);
+        
+        eventSource.onmessage = function(event) {
+            try {
+                const data = JSON.parse(event.data);
+                console.log('Strava progress update:', data);
+                
+                if (data.type === 'progress') {
+                    if (data.step) progressStep.textContent = data.step;
+                    if (data.progress) {
+                        progressBar.style.width = `${data.progress}%`;
+                        progressPercent.textContent = `${data.progress}%`;
+                    }
+                    if (data.message) progressMessage.textContent = data.message;
+                } else if (data.type === 'done') {
+                    console.log('Activity fetch complete');
+                    eventSource.close();
+                    // Hide progress modal after a short delay
+                    setTimeout(() => {
+                        progressModal.classList.add('hidden');
+                    }, 1000);
+                }
+            } catch (error) {
+                console.error('Error processing server message:', error, event.data);
+                eventSource.close();
+            }
+        };
+        
+        eventSource.onerror = function(error) {
+            console.error('EventSource error:', error);
+            eventSource.close();
+            progressModal.classList.add('hidden');
+        };
+    }
+
     const form = document.getElementById('routeForm');
     const loading = document.getElementById('loading');
     const result = document.getElementById('result');

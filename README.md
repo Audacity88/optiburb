@@ -38,7 +38,7 @@ cd web
 flask run
 ```
 
-Then open your browser to `http://localhost:5000`
+Then open your browser to `http://localhost:5001`
 
 ## Command Line Interface
 

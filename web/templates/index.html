@@ -28,7 +28,7 @@
                              alt="Profile" 
                              class="w-8 h-8 rounded-full">
                     {% else %}
-                        <a href="{{ url_for('strava_login') }}" 
+                        <a href="{{ url_for('auth.strava_login') }}" 
                            class="flex items-center px-4 py-2 bg-orange-500 hover:bg-orange-600 rounded-md transition-colors">
                             <img src="{{ url_for('static', filename='img/strava.svg') }}" 
                                  alt="Strava" 
@@ -149,7 +149,97 @@
         </div>
     </footer>
 
+    <div id="stravaProgress" class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full hidden">
+        <div class="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+            <div class="mt-3 text-center">
+                <h3 class="text-lg leading-6 font-medium text-gray-900" id="stravaProgressTitle">Connecting to Strava</h3>
+                <div class="mt-2 px-7 py-3">
+                    <div class="space-y-4">
+                        <div class="flex items-center justify-between">
+                            <span class="text-sm font-medium text-gray-700" id="stravaProgressStep">Initializing...</span>
+                            <span class="text-sm font-medium text-gray-700" id="stravaProgressPercent">0%</span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2.5">
+                            <div class="bg-orange-500 h-2.5 rounded-full transition-all duration-300" id="stravaProgressBar" style="width: 0%"></div>
+                        </div>
+                        <p class="text-sm text-gray-600" id="stravaProgressMessage"></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="{{ url_for('static', filename='js/main.js', v=range(0, 999999)|random) }}"></script>
+    {% if 'strava_token' in session and 'strava_fetch_id' in session %}
+    <script>
+        // Show progress modal
+        const progressModal = document.getElementById('stravaProgress');
+        progressModal.classList.remove('hidden');
+        
+        // Set up SSE for progress updates
+        const fetchId = '{{ session.strava_fetch_id }}';
+        const eventSource = new EventSource(`/strava/fetch-progress/${fetchId}`);
+        
+        eventSource.onmessage = function(event) {
+            try {
+                const data = JSON.parse(event.data);
+                console.log('Strava progress update:', data);
+                
+                const progressBar = document.getElementById('stravaProgressBar');
+                const progressStep = document.getElementById('stravaProgressStep');
+                const progressPercent = document.getElementById('stravaProgressPercent');
+                const progressMessage = document.getElementById('stravaProgressMessage');
+                
+                if (data.type === 'progress') {
+                    if (data.step) progressStep.textContent = data.step;
+                    if (data.progress) {
+                        progressBar.style.width = `${data.progress}%`;
+                        progressPercent.textContent = `${data.progress}%`;
+                    }
+                    if (data.message) progressMessage.textContent = data.message;
+                } else if (data.type === 'done') {
+                    console.log('Activity fetch complete');
+                    eventSource.close();
+                    // Hide progress modal after a short delay
+                    setTimeout(() => {
+                        progressModal.classList.add('hidden');
+                        // Only reload if new activities were fetched
+                        if (data.new_activities) {
+                            window.location.reload();
+                        }
+                    }, 1000);
+                }
+            } catch (error) {
+                console.error('Error processing server message:', error, event.data);
+                eventSource.close();
+                progressModal.classList.add('hidden');
+            }
+        };
+        
+        eventSource.onerror = function(error) {
+            console.error('EventSource error:', error);
+            eventSource.close();
+            progressModal.classList.add('hidden');
+        };
+
+        // Trigger activity fetch
+        fetch('/strava/fetch-activities')
+            .then(response => response.json())
+            .then(data => {
+                if (!data.success) {
+                    throw new Error(data.error || 'Failed to fetch activities');
+                }
+                // If using cached activities, hide the modal immediately
+                if (!data.new_activities) {
+                    progressModal.classList.add('hidden');
+                }
+            })
+            .catch(error => {
+                console.error('Error fetching activities:', error);
+                progressModal.classList.add('hidden');
+            });
+    </script>
+    {% endif %}
 </body>
 </html> 

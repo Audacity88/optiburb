@@ -67,3 +67,4 @@ def create_activity_map(activities, logger):
     else:
         logger.warning("No valid activities found to create map")
         return None
+

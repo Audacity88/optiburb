@@ -365,3 +365,4 @@ def get_segments():
     except Exception as e:
         logger.error(f"Error processing segments: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
