@@ -1,11 +1,18 @@
 import os
 from dotenv import load_dotenv
+import secrets
 
 # Load environment variables
 load_dotenv()
 
 # Flask Configuration
-SECRET_KEY = os.getenv('FLASK_SECRET_KEY', '4f8d7b972df4abe259e2d37c7ddbae734dd9f26654e73269910e12f7381f694b')
+SECRET_KEY = os.getenv('FLASK_SECRET_KEY')
+if not SECRET_KEY:
+    # Generate a random secret key if none is provided
+    SECRET_KEY = secrets.token_hex(32)
+    print("WARNING: Using a randomly generated secret key. This will change on each restart.")
+    print("Set FLASK_SECRET_KEY in your .env file for persistence.")
+
 MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB max file size
 SESSION_COOKIE_SECURE = False
 SESSION_COOKIE_HTTPONLY = True
