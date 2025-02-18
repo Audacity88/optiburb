@@ -34,11 +34,13 @@ log = logging.getLogger(__name__)
 
 class Burbing:
 
-    WARNING = '''WARNING - this program does not consider the direction of one-way roads or other roads that may be not suitable for your mode of transport. You must confirm the path safe for yourself'''
+    WARNING = '''Note: This program now considers one-way streets and road directionality. Please still verify routes for safety.'''
 
     def __init__(self):
-
         self.g = None
+        self.g_working = None  # Working copy of the graph
+        self.g_augmented = None  # Augmented graph for path finding
+        self.is_directed = True  # Default to directed graphs
 
         self.polygons = {}
         self.region = shapely.geometry.Polygon()
@@ -169,7 +171,18 @@ class Burbing:
     ##
     ##
     def get_pair_combinations(self, nodes):
-        pairs = list(itertools.combinations(nodes, 2))
+        """Get all possible directed pairs of nodes that need to be connected.
+        For directed graphs, we need to consider both directions between nodes."""
+        # Convert nodes to list for easier indexing
+        node_list = list(nodes)
+        pairs = []
+        
+        # For directed graphs, we need to consider both directions
+        for i in range(len(node_list)):
+            for j in range(len(node_list)):
+                if i != j:  # Don't create self-loops
+                    pairs.append((node_list[i], node_list[j]))
+        
         return pairs
 
     ##
@@ -206,58 +219,61 @@ class Burbing:
     ##
     ##
     def augment_graph(self, pairs):
-        """Create new edges between odd node pairs using actual road paths."""
-        log.info('pre augmentation eulerian=%s', nx.is_eulerian(self.g_augmented))
+        """Create new edges between node pairs using actual road paths."""
+        log.info('Augmenting directed graph')
+        
+        # Create a new directed graph for augmentation
+        self.g_augmented = self.g_working.copy()
         
         total_edges_added = 0
         straight_line_edges = 0
         
         for i, pair in enumerate(pairs):
-            a, b = pair
+            source, target = pair
             try:
-                # Get the shortest path between the nodes
-                length, path = nx.single_source_dijkstra(self.g, a, b, weight='length')
+                # Find shortest path between nodes
+                try:
+                    length, path = nx.single_source_dijkstra(self.g_working, source, target, weight='length')
+                except nx.NetworkXNoPath:
+                    log.error(f"No path found between nodes {source}-{target}")
+                    continue
                 
-                log.debug('PAIR[%s] nodes = (%s,%s), length=%s, path=%s', i, a, b, length, path)
+                log.debug(f'PAIR[{i}] nodes = ({source},{target}), length={length}, path={path}')
                 
                 # Create a linestring that follows the actual road path
-                linestring = self.path_to_linestring(self.g, path)
+                linestring = self.path_to_linestring(self.g_working, path)
                 if linestring is None:
-                    log.warning(f"Could not create linestring for path between nodes {a}-{b}, using straight line")
-                    # Create straight line as fallback
+                    log.warning(f"Could not create linestring for path between nodes {source}-{target}, using straight line")
                     try:
-                        a_coords = (self.g.nodes[a]['x'], self.g.nodes[a]['y'])
-                        b_coords = (self.g.nodes[b]['x'], self.g.nodes[b]['y'])
-                        linestring = shapely.geometry.LineString([a_coords, b_coords])
+                        source_coords = (self.g_working.nodes[source]['x'], self.g_working.nodes[source]['y'])
+                        target_coords = (self.g_working.nodes[target]['x'], self.g_working.nodes[target]['y'])
+                        linestring = shapely.geometry.LineString([source_coords, target_coords])
                         straight_line_edges += 1
                     except (KeyError, AttributeError) as e:
-                        log.error(f"Cannot create straight line for edge {a}-{b}: {str(e)}")
+                        log.error(f"Cannot create straight line for edge {source}-{target}: {str(e)}")
                         continue
                 
                 # Create edge data with the path geometry
-                data = {
+                edge_data = {
                     'length': length,
                     'augmented': True,
                     'path': path,
                     'geometry': linestring,
-                    'from': a,
-                    'to': b,
+                    'from': source,
+                    'to': target
                 }
                 
-                # Add the edge to the augmented graph
-                self.g_augmented.add_edge(a, b, **data)
+                # Add the directed edge
+                self.g_augmented.add_edge(source, target, **edge_data)
                 total_edges_added += 1
                 
                 if straight_line_edges > 0:
-                    log.warning(f"Created straight line for edge {a}-{b} - STRAIGHT LINE WILL BE VISIBLE IN ROUTE")
+                    log.warning(f"Created straight line for edge {source}-{target} - STRAIGHT LINE WILL BE VISIBLE IN ROUTE")
                 else:
-                    log.info(f"Added augmented edge {a}-{b} with real road geometry")
-                    
-            except nx.NetworkXNoPath:
-                log.error(f"No path found between nodes {a}-{b}")
-                continue
+                    log.info(f"Added augmented edge {source}-{target} with real road geometry")
+                
             except Exception as e:
-                log.error(f"Error creating augmented edge {a}-{b}: {str(e)}")
+                log.error(f"Error creating augmented edge {source}-{target}: {str(e)}")
                 continue
         
         # Log summary of edge additions
@@ -269,9 +285,21 @@ class Burbing:
             if straight_line_edges > 0:
                 log.warning(f"  - {straight_line_edges} edges ({(straight_line_edges/total_edges_added)*100:.1f}%) are using straight lines!")
         
-        log.info('post augmentation eulerian=%s', nx.is_eulerian(self.g_augmented))
+        # Verify all nodes are balanced
+        unbalanced_nodes = []
+        for node in self.g_augmented.nodes():
+            in_degree = self.g_augmented.in_degree(node)
+            out_degree = self.g_augmented.out_degree(node)
+            if in_degree != out_degree:
+                unbalanced_nodes.append((node, in_degree, out_degree))
+        
+        if unbalanced_nodes:
+            log.error("Graph is not balanced after augmentation:")
+            for node, in_deg, out_deg in unbalanced_nodes:
+                log.error(f"Node {node}: in={in_deg}, out={out_deg}")
+            raise ValueError("Failed to maintain balance during augmentation")
+        
         return
-
 
     ##
     ##
@@ -405,23 +433,24 @@ class Burbing:
     ##
     ##
     def determine_nodes(self):
-        log.info('converting directed graph to undirected')
+        """Process the graph and prepare it for finding an Eulerian circuit."""
+        log.info('Processing directed graph')
 
-        # Store the original directed graph before any modifications
-        self.g_directed = self.g.copy()
+        # Store the original directed graph
+        self.g_original = self.g.copy()
         
-        # Convert to undirected for processing
-        self.g = self.g_directed.to_undirected()
+        # Create a working copy that we'll modify
+        self.g_working = self.g.copy()
         
-        # Ensure coordinates are preserved in the undirected graph
-        for node in self.g.nodes():
+        # Ensure coordinates are preserved
+        for node in self.g_working.nodes():
             if node in self.node_coords:
                 x, y = self.node_coords[node]
-                self.g.nodes[node]['x'] = x
-                self.g.nodes[node]['y'] = y
+                self.g_working.nodes[node]['x'] = x
+                self.g_working.nodes[node]['y'] = y
         
-        # Find connected components
-        components = list(nx.connected_components(self.g))
+        # Find weakly connected components (for directed graphs)
+        components = list(nx.weakly_connected_components(self.g_working))
         if len(components) > 1:
             log.warning(f'Graph has {len(components)} disconnected components')
             # Log the size of each component
@@ -433,146 +462,342 @@ class Burbing:
             
             # Add the connecting edges to our graph
             for u, v, data in connecting_edges:
-                # Add edge in both directions since this is an undirected graph
-                self.g.add_edge(u, v, **data)
-                # Add reverse edge with same data
+                # Add edge in both directions to ensure connectivity
+                self.g_working.add_edge(u, v, **data)
+                # Add reverse edge with same data but reversed geometry
                 reverse_data = dict(data)
                 if 'geometry' in reverse_data:
-                    # Reverse the geometry for the opposite direction
                     reverse_data['geometry'] = shapely.geometry.LineString(list(reverse_data['geometry'].coords)[::-1])
-                self.g.add_edge(v, u, **reverse_data)
-                log.debug(f'Added connecting edge {u}-{v} with geometry')
+                self.g_working.add_edge(v, u, **reverse_data)
+                log.debug(f'Added connecting edges {u}-{v} and {v}-{u} with geometry')
+        
+        # For each node, ensure in-degree equals out-degree (required for Eulerian circuit)
+        nodes_balanced = 0
+        edges_added = 0
+        
+        for node in self.g_working.nodes():
+            in_degree = self.g_working.in_degree(node)
+            out_degree = self.g_working.out_degree(node)
             
-            # Verify the graph is now connected
-            if not nx.is_connected(self.g):
-                log.error("Graph is still disconnected after adding connecting edges")
-            else:
-                log.info(f"Successfully connected graph by adding {len(connecting_edges)} edges")
+            if in_degree != out_degree:
+                log.info(f"Node {node} has imbalanced degrees: in={in_degree}, out={out_degree}")
+                # Add necessary edges to balance the node
+                if in_degree > out_degree:
+                    # Need more outgoing edges
+                    for _ in range(in_degree - out_degree):
+                        # Find a reachable node we can connect to
+                        for target in self.g_working.nodes():
+                            if target != node and not self.g_working.has_edge(node, target):
+                                # Try to find a path to this node
+                                try:
+                                    path = nx.shortest_path(self.g_working, node, target, weight='length')
+                                    # Create edge following this path
+                                    self._add_path_as_edge(node, target, path)
+                                    edges_added += 1
+                                    break
+                                except nx.NetworkXNoPath:
+                                    continue
+                elif out_degree > in_degree:
+                    # Need more incoming edges
+                    for _ in range(out_degree - in_degree):
+                        # Find a node that can reach us
+                        for source in self.g_working.nodes():
+                            if source != node and not self.g_working.has_edge(source, node):
+                                try:
+                                    path = nx.shortest_path(self.g_working, source, node, weight='length')
+                                    self._add_path_as_edge(source, node, path)
+                                    edges_added += 1
+                                    break
+                                except nx.NetworkXNoPath:
+                                    continue
+                
+                # Verify the node is now balanced
+                new_in_degree = self.g_working.in_degree(node)
+                new_out_degree = self.g_working.out_degree(node)
+                if new_in_degree == new_out_degree:
+                    nodes_balanced += 1
+                else:
+                    log.error(f"Failed to balance node {node}: in={new_in_degree}, out={new_out_degree}")
         
-        self.print_edges(self.g)
+        log.info(f"Balanced {nodes_balanced} nodes by adding {edges_added} edges")
         
-        # Create augmented graph and ensure coordinates are preserved
-        self.g_augmented = self.g.copy()
+        # Create augmented graph
+        self.g_augmented = self.g_working.copy()
+        
+        # Ensure coordinates are preserved in augmented graph
         for node in self.g_augmented.nodes():
             if node in self.node_coords:
                 x, y = self.node_coords[node]
                 self.g_augmented.nodes[node]['x'] = x
                 self.g_augmented.nodes[node]['y'] = y
         
-        self.odd_nodes = self.find_odd_nodes()
+        # Verify the graph is balanced
+        unbalanced_nodes = [(node, self.g_augmented.in_degree(node), self.g_augmented.out_degree(node))
+                           for node in self.g_augmented.nodes()
+                           if self.g_augmented.in_degree(node) != self.g_augmented.out_degree(node)]
+        
+        if unbalanced_nodes:
+            log.error("Graph is still not balanced after processing:")
+            for node, in_deg, out_deg in unbalanced_nodes:
+                log.error(f"Node {node}: in={in_deg}, out={out_deg}")
+            raise ValueError("Failed to create a balanced directed graph")
+        
         return
 
+    def _add_path_as_edge(self, source, target, path):
+        """Helper method to add a new edge that follows an existing path."""
+        if len(path) < 2:
+            return
+            
+        # Calculate total length along the path
+        length = 0
+        coords = []
+        
+        for i in range(len(path) - 1):
+            u, v = path[i], path[i + 1]
+            edge_data = self.g_working.get_edge_data(u, v)
+            if edge_data:
+                length += edge_data.get('length', 0)
+                if 'geometry' in edge_data and edge_data['geometry'] is not None:
+                    if not coords:  # First segment
+                        coords.extend(list(edge_data['geometry'].coords))
+                    else:  # Subsequent segments - skip first point to avoid duplication
+                        coords.extend(list(edge_data['geometry'].coords)[1:])
+        
+        # Create edge data
+        data = {
+            'length': length,
+            'augmented': True,
+            'path': path,
+            'geometry': shapely.geometry.LineString(coords) if coords else None
+        }
+        
+        # Add the edge
+        self.g_working.add_edge(source, target, **data)
+        log.info(f"Added balancing edge {source}-{target} with length {length:.2f}")
 
     ##
     ##
     def optimise_dead_ends(self):
-
-        # preempt virtual path augmentation for the case of a dead-end
-        # road.  Here the optimum combination pair is its only
-        # neighbour node, so why bother iterating through all the
-        # pairs to find that.
-
-        # XXX - not quite clean yet.. we are augmenting the original
-        # grpah.. need a cleaner way to pass changes through the
-        # processing pipeline.
-
-        deadends = { i for i, n in self.g.degree if n == 1 }
-
-        n1 = len(self.find_odd_nodes())
-
+        """Optimize dead-end roads in a directed graph by adding return edges."""
+        log.info('Optimizing dead-end roads in directed graph')
+        
+        # Find dead ends (nodes with total degree of 1)
+        deadends = set()
+        for node in self.g_working.nodes():
+            in_degree = self.g_working.in_degree(node)
+            out_degree = self.g_working.out_degree(node)
+            if in_degree + out_degree == 1:
+                deadends.add(node)
+                log.info(f"Found dead end at node {node}: in={in_degree}, out={out_degree}")
+        
+        if not deadends:
+            log.info("No dead ends found in graph")
+            return
+        
+        log.info(f"Found {len(deadends)} dead ends to optimize")
+        edges_added = 0
+        
         for deadend in deadends:
-
-            neighbours = self.g[deadend]
-
-            #node_data = self.g.nodes[deadend]
-            #log.info('deadend_ndoe=%s, data=%s', deadend, node_data)
-            log.debug('deadend_node=%s', deadend)
-
-            if len(neighbours) != 1:
-                log.error('wrong number of neighbours for a dead-end street')
+            # Check incoming edges
+            in_edges = list(self.g_working.in_edges(deadend, data=True))
+            # Check outgoing edges
+            out_edges = list(self.g_working.out_edges(deadend, data=True))
+            
+            if len(in_edges) + len(out_edges) != 1:
+                log.error(f'Wrong number of edges for dead-end node {deadend}')
                 continue
-
-            for neighbour in neighbours.keys():
-                log.debug('neighbour=%s', neighbour)
-
-                edge_data = dict(self.g.get_edge_data(deadend, neighbour, 0))
-                edge_data['augmented'] = True
-                
-                log.debug('  creating new edge (%s,%s) - data=%s', deadend, neighbour, edge_data)
-
-                self.g.add_edge(deadend, neighbour, **edge_data)
-
-                pass
-
-            pass
-
-        # fix up the stuff we just busted.  XXX - this should not be
-        # hidden in here.
-
-        self.odd_nodes = self.find_odd_nodes()
-        self.g_augmented = self.g.copy()
-
-        n2 = len(self.odd_nodes)
-
-        log.info('odd_nodes_before=%d, odd_nodes_after=%d', n1, n2)
-        log.info('optimised %d nodes out', n1 - n2)
-
+            
+            # If we have an incoming edge, add a return edge
+            if in_edges:
+                source, target, data = in_edges[0]
+                if not self.g_working.has_edge(target, source):
+                    edge_data = dict(data)
+                    edge_data['augmented'] = True
+                    if 'geometry' in edge_data and edge_data['geometry'] is not None:
+                        # Reverse the geometry for the return edge
+                        edge_data['geometry'] = shapely.geometry.LineString(
+                            list(edge_data['geometry'].coords)[::-1]
+                        )
+                    self.g_working.add_edge(target, source, **edge_data)
+                    edges_added += 1
+                    log.info(f"Added return edge for dead end: {target}->{source}")
+            
+            # If we have an outgoing edge, add a return edge
+            if out_edges:
+                source, target, data = out_edges[0]
+                if not self.g_working.has_edge(target, source):
+                    edge_data = dict(data)
+                    edge_data['augmented'] = True
+                    if 'geometry' in edge_data and edge_data['geometry'] is not None:
+                        # Reverse the geometry for the return edge
+                        edge_data['geometry'] = shapely.geometry.LineString(
+                            list(edge_data['geometry'].coords)[::-1]
+                        )
+                    self.g_working.add_edge(target, source, **edge_data)
+                    edges_added += 1
+                    log.info(f"Added return edge for dead end: {target}->{source}")
+        
+        log.info(f"Added {edges_added} return edges for dead ends")
+        
+        # Verify the graph remains balanced
+        unbalanced_nodes = []
+        for node in self.g_working.nodes():
+            in_degree = self.g_working.in_degree(node)
+            out_degree = self.g_working.out_degree(node)
+            if in_degree != out_degree:
+                unbalanced_nodes.append((node, in_degree, out_degree))
+        
+        if unbalanced_nodes:
+            log.error("Graph is not balanced after dead end optimization:")
+            for node, in_deg, out_deg in unbalanced_nodes:
+                log.error(f"Node {node}: in={in_deg}, out={out_deg}")
+            raise ValueError("Failed to maintain balance during dead end optimization")
+        
+        # Update augmented graph
+        self.g_augmented = self.g_working.copy()
+        
+        # Preserve coordinates
+        for node in self.g_augmented.nodes():
+            if node in self.node_coords:
+                x, y = self.node_coords[node]
+                self.g_augmented.nodes[node]['x'] = x
+                self.g_augmented.nodes[node]['y'] = y
+        
         return
 
     ##
     ##
     def determine_combinations(self):
-
-        log.info('eulerian=%s, odd_nodes=%s', nx.is_eulerian(self.g), len(self.odd_nodes))
-
-        odd_node_pairs = self.get_pair_combinations(self.odd_nodes)
-
-        log.info('combinations=%s', len(odd_node_pairs))
-
-        odd_pair_paths = self.get_shortest_path_pairs(self.g, odd_node_pairs)
-
-        # XXX - this part doesn't work well because it doesn't
-        # consider the direction of the paths.
-
-        # create a temporary graph of odd pairs.. really we should be
-        # doing the combination max calculations here.
-
-        self.g_odd_nodes = nx.Graph()
-
-        for k, length in odd_pair_paths.items():
-            i,j = k
-            attrs = {
-                'length': length,
-                'weight': -length,
-            }
-
-            self.g_odd_nodes.add_edge(i, j, **attrs)
-            pass
-
-        log.info('new_nodes=%s, edges=%s, eulerian=%s', self.g_odd_nodes.order(), self.g_odd_nodes.size(), nx.is_eulerian(self.g_odd_nodes))
-
-        log.info('calculating max weight matching - this can also take a while')
-
-        return
-
-    ##
-    ##
-    def determine_circuit(self):
-        odd_matching = nx.algorithms.max_weight_matching(self.g_odd_nodes, True)
-        log.info('augment original graph with %s pairs', len(odd_matching))
+        """Determine combinations for balancing the directed graph."""
+        log.info('Processing directed graph combinations')
         
-        self.augment_graph(odd_matching)
+        # Find nodes that need balancing
+        need_incoming = []  # Nodes that need more incoming edges
+        need_outgoing = []  # Nodes that need more outgoing edges
         
-        # Ensure coordinates are preserved in augmented graph after augmentation
+        for node in self.g_working.nodes():
+            in_degree = self.g_working.in_degree(node)
+            out_degree = self.g_working.out_degree(node)
+            if in_degree < out_degree:
+                need_incoming.append((node, out_degree - in_degree))
+                log.info(f"Node {node} needs {out_degree - in_degree} incoming edges")
+            elif out_degree < in_degree:
+                need_outgoing.append((node, in_degree - out_degree))
+                log.info(f"Node {node} needs {in_degree - out_degree} outgoing edges")
+        
+        log.info(f'Found {len(need_incoming)} nodes needing incoming edges')
+        log.info(f'Found {len(need_outgoing)} nodes needing outgoing edges')
+        
+        # Add balancing edges
+        edges_added = 0
+        for source, out_needed in need_outgoing:
+            for target, in_needed in need_incoming:
+                if source != target and in_needed > 0 and out_needed > 0:
+                    try:
+                        # Find shortest path between nodes
+                        path = nx.shortest_path(self.g_working, source, target, weight='length')
+                        # Add edge following this path
+                        self._add_path_as_edge(source, target, path)
+                        edges_added += 1
+                        in_needed -= 1
+                        out_needed -= 1
+                        log.info(f"Added balancing edge from {source} to {target}")
+                    except nx.NetworkXNoPath:
+                        log.warning(f"No path found between {source} and {target}")
+                        continue
+        
+        log.info(f'Added {edges_added} balancing edges')
+        
+        # Verify balance
+        unbalanced = []
+        for node in self.g_working.nodes():
+            in_degree = self.g_working.in_degree(node)
+            out_degree = self.g_working.out_degree(node)
+            if in_degree != out_degree:
+                unbalanced.append((node, in_degree, out_degree))
+                log.error(f'Node {node} remains unbalanced: in={in_degree}, out={out_degree}')
+        
+        if unbalanced:
+            log.error(f'Graph still has {len(unbalanced)} unbalanced nodes:')
+            for node, in_deg, out_deg in unbalanced:
+                log.error(f'Node {node}: in={in_deg}, out={out_deg}')
+            raise ValueError("Failed to balance the directed graph")
+        
+        # Create augmented graph
+        self.g_augmented = self.g_working.copy()
+        
+        # Preserve coordinates
         for node in self.g_augmented.nodes():
             if node in self.node_coords:
                 x, y = self.node_coords[node]
                 self.g_augmented.nodes[node]['x'] = x
                 self.g_augmented.nodes[node]['y'] = y
         
-        start_node = self.get_start_node(self.g, self.start)
-        self.euler_circuit = list(nx.eulerian_circuit(self.g_augmented, source=start_node))
+        # Verify graph is weakly connected
+        if not nx.is_weakly_connected(self.g_augmented):
+            components = list(nx.weakly_connected_components(self.g_augmented))
+            raise ValueError(f"Graph is not connected after balancing. Found {len(components)} weakly connected components.")
+        
+        log.info("Successfully balanced directed graph")
         return
+
+    ##
+    ##
+    def determine_circuit(self):
+        """Determine the Eulerian circuit in the directed graph."""
+        log.info('Starting to find Eulerian circuit in directed graph')
+        
+        # Get start node
+        start_node = self.get_start_node(self.g_working, self.start)
+        if start_node is None:
+            # If no start node specified, use any node
+            start_node = list(self.g_augmented.nodes())[0]
+            log.info(f"Using node {start_node} as start point")
+        
+        # First verify the graph is balanced
+        unbalanced_nodes = []
+        for node in self.g_augmented.nodes():
+            in_degree = self.g_augmented.in_degree(node)
+            out_degree = self.g_augmented.out_degree(node)
+            if in_degree != out_degree:
+                unbalanced_nodes.append((node, in_degree, out_degree))
+                log.error(f"Node {node} has imbalanced degrees: in={in_degree}, out={out_degree}")
+        
+        if unbalanced_nodes:
+            raise ValueError(f"Graph is not balanced. Found {len(unbalanced_nodes)} unbalanced nodes.")
+        
+        # Verify graph is weakly connected
+        if not nx.is_weakly_connected(self.g_augmented):
+            components = list(nx.weakly_connected_components(self.g_augmented))
+            raise ValueError(f"Graph is not connected. Found {len(components)} weakly connected components.")
+        
+        # Find Eulerian circuit
+        try:
+            # For directed graphs, we use nx.eulerian_circuit directly
+            self.euler_circuit = list(nx.eulerian_circuit(self.g_augmented, source=start_node))
+            log.info(f"Found initial Eulerian circuit with {len(self.euler_circuit)} edges")
+            
+            # Verify all edges are included
+            circuit_edges = set((u,v) for u,v in self.euler_circuit)
+            all_edges = set(self.g_augmented.edges())
+            missing_edges = all_edges - circuit_edges
+            
+            if missing_edges:
+                log.error(f"Circuit is incomplete. Missing {len(missing_edges)} edges:")
+                for edge in missing_edges:
+                    log.error(f"Missing edge: {edge}")
+                raise ValueError(f"Circuit is incomplete. Missing {len(missing_edges)} edges.")
+            
+            log.info("Successfully verified circuit includes all edges")
+            return
+            
+        except nx.NetworkXError as e:
+            log.error(f"Failed to find Eulerian circuit: {str(e)}")
+            raise ValueError(f"Failed to find Eulerian circuit: {str(e)}")
+        except Exception as e:
+            log.error(f"Unexpected error finding Eulerian circuit: {str(e)}")
+            raise
 
     ##
     ##
@@ -672,6 +897,7 @@ class Burbing:
         # Process each pair of nodes in the path
         for i in range(len(path) - 1):
             u, v = path[i], path[i + 1]
+            
             
             # Try to get edge data and geometry
             edge_data = g.get_edge_data(u, v, 0)
@@ -802,14 +1028,22 @@ class Burbing:
     ##
     ##
     def load(self, options):
-        log.info('fetching OSM data bounded by polygon')
-        self.g = osmnx.graph_from_polygon(self.region, network_type='bike', simplify=False, custom_filter=self.custom_filter, retain_all=True)
+        log.info('Fetching OSM data bounded by polygon')
+        # Get directed graph from OSM
+        self.g = osmnx.graph_from_polygon(self.region, network_type='drive', simplify=False, 
+                                        custom_filter=self.custom_filter, retain_all=True)
+        
+        # Ensure we have a directed graph
+        if not isinstance(self.g, nx.DiGraph):
+            log.warning("Converting graph to directed type")
+            self.g = nx.DiGraph(self.g)
         
         # Store original graph immediately after creation
         self.g_original = self.g.copy()
         
         # Get nodes and edges as GeoDataFrames with explicit geometry
-        nodes, edges = osmnx.utils_graph.graph_to_gdfs(self.g, nodes=True, edges=True, node_geometry=True, fill_edge_geometry=True)
+        nodes, edges = osmnx.utils_graph.graph_to_gdfs(self.g, nodes=True, edges=True, 
+                                                      node_geometry=True, fill_edge_geometry=True)
         
         # Ensure we have node coordinates
         if 'geometry' not in nodes.columns:
@@ -841,7 +1075,10 @@ class Burbing:
         
         log.debug('original g=%s, g=%s', self.g, type(self.g))
         log.info('original nodes=%s, edges=%s', self.g.order(), self.g.size())
-
+        
+        # Create working copy of the graph
+        self.g_working = self.g.copy()
+        
         # If we have completed roads and want to exclude them
         if hasattr(self, 'completed_area') and not self.completed_area.is_empty and options.exclude_completed:
             log.info('Removing completed roads from the network')
@@ -857,8 +1094,9 @@ class Burbing:
             edges_removed = 0
             total_edges = len(self.g.edges())
             
-            # Keep track of edges to remove
+            # Keep track of edges to remove and potential connector edges
             edges_to_remove = []
+            connector_edges = []
             
             # Process edges in both directions
             for u, v, data in list(self.g.edges(data=True)):
@@ -892,11 +1130,17 @@ class Burbing:
                         edge_area = edge_buffer.area if edge_buffer.area > 0 else 1e-10
                         overlap_ratio = intersection_area / edge_area
                         
-                        # If more than 30% completed, mark for removal
+                        # If more than 30% completed
                         if overlap_ratio > 0.3:
-                            edges_to_remove.append((u, v))
-                            edges_removed += 1
-                            log.debug(f"Marking edge {u}-{v} for removal (overlap: {overlap_ratio:.2%})")
+                            # If we're allowing connectors, store it as a potential connector
+                            if options.allow_completed_connectors:
+                                connector_edges.append((u, v, dict(data)))
+                                log.debug(f"Marking edge {u}-{v} as potential connector (overlap: {overlap_ratio:.2%})")
+                            # Otherwise, mark for removal
+                            else:
+                                edges_to_remove.append((u, v))
+                                edges_removed += 1
+                                log.debug(f"Marking edge {u}-{v} for removal (overlap: {overlap_ratio:.2%})")
                     
                     # Only log progress every 500 edges
                     if edges_processed % 500 == 0:
@@ -912,9 +1156,24 @@ class Burbing:
                 if self.g.has_edge(u, v):
                     self.g.remove_edge(u, v)
                     edges_actually_removed += 1
-                if self.g.has_edge(v, u):  # Remove reverse edge if it exists
-                    self.g.remove_edge(v, u)
-                    edges_actually_removed += 1
+            
+            # If we're allowing connectors, only add them back if needed to maintain connectivity
+            if options.allow_completed_connectors and connector_edges:
+                # Find weakly connected components after removing completed edges
+                components = list(nx.weakly_connected_components(self.g))
+                if len(components) > 1:
+                    log.info(f"Graph has {len(components)} disconnected components after removing completed edges")
+                    
+                    # Find minimal set of connector edges needed
+                    connecting_edges = self.find_connecting_edges(components)
+                    
+                    # Add back only the necessary connector edges
+                    connectors_added = 0
+                    for u, v, data in connecting_edges:
+                        self.g.add_edge(u, v, **data)
+                        connectors_added += 1
+                    
+                    log.info(f"Added {connectors_added} completed roads back as connectors")
             
             # Remove any isolated nodes that resulted from edge removal
             original_node_count = self.g.number_of_nodes()
@@ -935,6 +1194,8 @@ class Burbing:
             log.warning(f"  - Edges processed: {edges_processed}")
             log.warning(f"  - Edges marked for removal: {edges_removed}")
             log.warning(f"  - Edges actually removed: {edges_actually_removed}")
+            if options.allow_completed_connectors:
+                log.warning(f"  - Completed edges kept as connectors: {len(connector_edges)}")
             log.warning(f"  - Nodes removed: {nodes_removed}")
             log.warning(f"  - Remaining nodes: {len(self.g.nodes)}")
             log.warning(f"  - Nodes with coordinates: {nodes_with_coords}")
@@ -958,7 +1219,10 @@ class Burbing:
             log.info(f"After simplification:")
             log.info(f"  - Remaining nodes: {len(self.g.nodes)}")
             log.info(f"  - Nodes with coordinates: {nodes_with_coords}")
-
+        
+        # Update working copy after all modifications
+        self.g_working = self.g.copy()
+        
         return
 
     ##
@@ -1032,33 +1296,35 @@ class Burbing:
     ##
     ##
     def create_gpx_track(self, g, edges, simplify=False):
-        # create GPX XML.
-
-        # Ensure coordinates are present in the graph
-        for node in g.nodes():
-            if node in self.node_coords and ('x' not in g.nodes[node] or 'y' not in g.nodes[node]):
-                x, y = self.node_coords[node]
-                g.nodes[node]['x'] = x
-                g.nodes[node]['y'] = y
-        
+        """Create a GPX track with direction indicators."""
         stats_distance = 0.0
         stats_backtrack = 0.0
         stats_deadends = 0
+        total_direction_markers = 0
+
+        log.info('Creating GPX track with direction indicators')
+        log.info(f'Number of edges to process: {len(edges)}')
 
         gpx = gpxpy.gpx.GPX()
         gpx.name = f'burb {self.name}'
         gpx.author_name = 'optiburb'
         gpx.creator = 'experimental burbing'
-        gpx.description = f'experimental burbing route for {self.name}'
+        gpx.description = f'experimental burbing route for {self.name} (with direction indicators)'
+
+        # Add style information as keywords
+        gpx.keywords = 'directed route,one-way streets'
 
         track = gpxpy.gpx.GPXTrack()
         track.name = f'burb trk {self.name}'
+        track.type = 'directed'  # Custom type to indicate this is a directed route
         gpx.tracks.append(track)
 
         segment = gpxpy.gpx.GPXTrackSegment()
         track.segments.append(segment)
 
         i = 1
+        arrow_interval = 3  # Add direction arrow more frequently (every 3 points)
+        log.info(f'Using arrow interval of {arrow_interval} points')
 
         for n, edge in enumerate(edges):
             u, v = edge
@@ -1068,12 +1334,12 @@ class Burbing:
 
             if edge_data is None:
                 log.warning('null data for edge %s', edge)
-                # Create straight line between nodes
                 try:
                     u_coords = (g.nodes[u]['x'], g.nodes[u]['y'])
                     v_coords = (g.nodes[v]['x'], g.nodes[v]['y'])
-                    segment.points.append(gpxpy.gpx.GPXRoutePoint(latitude=u_coords[1], longitude=u_coords[0]))
-                    segment.points.append(gpxpy.gpx.GPXRoutePoint(latitude=v_coords[1], longitude=v_coords[0]))
+                    # Add points with direction indicator
+                    markers_added = self._add_track_points(segment, [u_coords, v_coords], i, arrow_interval)
+                    total_direction_markers += markers_added if markers_added else 0
                     i += 2
                 except (KeyError, AttributeError) as e:
                     log.error(f"Cannot create straight line for edge {edge}: {str(e)}")
@@ -1083,16 +1349,19 @@ class Burbing:
             augmented = edge_data.get('augmented')
             stats_distance += edge_data.get('length', 0)
 
-            log.debug(' leg [%d] -> %s (%s,%s,%s,%s,%s)', n, edge_data.get('name', ''), edge_data.get('highway', ''), edge_data.get('surface', ''), edge_data.get('oneway', ''), edge_data.get('access', ''), edge_data.get('length', 0))
+            log.debug(' leg [%d] -> %s (%s,%s,%s,%s,%s)', n, edge_data.get('name', ''), 
+                     edge_data.get('highway', ''), edge_data.get('surface', ''), 
+                     edge_data.get('oneway', ''), edge_data.get('access', ''), 
+                     edge_data.get('length', 0))
 
             coords_to_use = None
             if linestring:
                 directional_linestring = self.directional_linestring(edge, linestring)
                 if directional_linestring:
                     coords_to_use = directional_linestring
+                    log.debug(f'Using directional linestring with {len(coords_to_use)} points')
 
             if coords_to_use is None:
-                # If no valid linestring, create straight line between nodes
                 try:
                     u_coords = (g.nodes[u]['x'], g.nodes[u]['y'])
                     v_coords = (g.nodes[v]['x'], g.nodes[v]['y'])
@@ -1102,16 +1371,17 @@ class Burbing:
                     log.error(f"Cannot create straight line for edge {edge}: {str(e)}")
                     continue
 
-            for lon, lat in coords_to_use:
-                segment.points.append(gpxpy.gpx.GPXRoutePoint(latitude=lat, longitude=lon))
-                log.debug('     INDEX[%d] = (%s, %s)', i, lat, lon)
-                i += 1
+            # Add points with direction indicators
+            markers_added = self._add_track_points(segment, coords_to_use, i, arrow_interval)
+            total_direction_markers += markers_added if markers_added else 0
+            i += len(coords_to_use)
 
             if edge_data.get('augmented', False):
                 stats_backtrack += edge_data.get('length', 0)
 
         log.info('total distance = %.2fkm', stats_distance/1000.0)
         log.info('backtrack distance = %.2fkm', stats_backtrack/1000.0)
+        log.info(f'Total direction markers added to GPX: {total_direction_markers}')
         
         if simplify:
             log.info('simplifying GPX')
@@ -1126,6 +1396,66 @@ class Burbing:
             f.write(data)
 
         return filename
+
+    def _add_track_points(self, segment, coords, start_index, arrow_interval):
+        """Add track points with direction indicators at specified intervals."""
+        direction_markers_added = 0
+        log.info(f'Adding track points for segment starting at index {start_index}, interval={arrow_interval}')
+        log.info(f'Number of coordinates to process: {len(coords)}')
+        
+        # For very short segments (2 points), always add a direction marker at the first point
+        is_short_segment = len(coords) == 2
+        
+        for i, (lon, lat) in enumerate(coords):
+            point = gpxpy.gpx.GPXTrackPoint(latitude=lat, longitude=lon)
+            
+            # Add direction indicator if:
+            # 1. For short segments (2 points): at the first point
+            # 2. For longer segments: at regular intervals within the segment
+            should_add_marker = (
+                (is_short_segment and i == 0) or  # First point of short segment
+                (not is_short_segment and i % arrow_interval == 0 and i < len(coords) - 1)  # Regular interval within segment
+            )
+            
+            if should_add_marker:
+                next_lon, next_lat = coords[i + 1]
+                bearing = self._calculate_bearing(lat, lon, next_lat, next_lon)
+                
+                # Set point attributes for direction marker
+                point.type = 'direction'  # Changed to match what the frontend expects
+                point.symbol = '➜'  # Set a larger arrow symbol
+                point.comment = str(round(bearing, 1))  # Store bearing directly in comment
+                
+                direction_markers_added += 1
+                log.info(f'Added direction marker at point {start_index + i}: bearing={bearing}°, coords=({lat}, {lon})')
+            
+            segment.points.append(point)
+        
+        log.info(f'Added {direction_markers_added} direction markers in this segment')
+        if direction_markers_added == 0:
+            log.warning('No direction markers were added in this segment')
+            log.warning(f'Segment details: start_index={start_index}, coords={len(coords)}, interval={arrow_interval}')
+        
+        return direction_markers_added
+
+    def _calculate_bearing(self, lat1, lon1, lat2, lon2):
+        """Calculate the bearing between two points in degrees."""
+        import math
+        
+        # Convert to radians
+        lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+        
+        # Calculate bearing
+        d_lon = lon2 - lon1
+        y = math.sin(d_lon) * math.cos(lat2)
+        x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(d_lon)
+        bearing = math.atan2(y, x)
+        
+        # Convert to degrees
+        bearing = math.degrees(bearing)
+        
+        # Normalize to 0-360
+        return (bearing + 360) % 360
 
     pass
 

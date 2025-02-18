@@ -1,5 +1,6 @@
 from shapely.geometry import LineString, Point
 from shapely.ops import unary_union
+import math
 
 def decode_polyline(polyline):
     """Decode a Google encoded polyline string into a list of coordinates."""
@@ -121,4 +122,35 @@ def create_activity_map(activities, logger):
     else:
         logger.warning("No valid activities found to create map")
         return None
+
+def calculate_bearing(lat1, lon1, lat2, lon2):
+    """
+    Calculate the bearing between two points on the earth.
+    Args:
+        lat1, lon1: Latitude and longitude of the first point in degrees
+        lat2, lon2: Latitude and longitude of the second point in degrees
+    Returns:
+        Bearing in degrees from 0-360
+    """
+    # Convert to radians
+    lat1 = math.radians(lat1)
+    lon1 = math.radians(lon1)
+    lat2 = math.radians(lat2)
+    lon2 = math.radians(lon2)
+    
+    # Calculate differences
+    d_lon = lon2 - lon1
+    
+    # Calculate bearing
+    y = math.sin(d_lon) * math.cos(lat2)
+    x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(d_lon)
+    bearing = math.atan2(y, x)
+    
+    # Convert to degrees
+    bearing = math.degrees(bearing)
+    
+    # Normalize to 0-360
+    bearing = (bearing + 360) % 360
+    
+    return bearing
 

@@ -160,6 +160,12 @@ def strava_callback():
     
     # Store the token in the session
     session['strava_token'] = token_data
+    
+    # Store athlete ID separately for consistent identification
+    if 'athlete' in token_data and 'id' in token_data['athlete']:
+        session['athlete_id'] = str(token_data['athlete']['id'])
+        logger.info(f"Stored athlete ID {session['athlete_id']} in session")
+    
     logger.info("Successfully stored token in session")
     
     # Redirect to the main page immediately

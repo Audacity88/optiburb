@@ -7,12 +7,24 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet-polylinedecorator@1.6.0/dist/leaflet.polylineDecorator.js"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <style>
         #map {
             height: 400px;
             width: 100%;
             border-radius: 0.5rem;
+        }
+        
+        .direction-arrow {
+            width: 0;
+            height: 0;
+            border-left: 8px solid transparent;
+            border-right: 8px solid transparent;
+            border-bottom: 16px solid #3388ff;
+            transform-origin: 50% 50%;
+            filter: drop-shadow(1px 1px 1px white);
         }
     </style>
 </head>
@@ -103,6 +115,12 @@
                                 <input type="checkbox" name="excludeCompleted" class="rounded text-blue-600" checked>
                                 <span class="ml-2 text-gray-700">Exclude completed roads</span>
                             </label>
+                            <div class="ml-6">
+                                <label class="flex items-center">
+                                    <input type="checkbox" name="allowCompletedConnectors" class="rounded text-blue-600" checked>
+                                    <span class="ml-2 text-gray-700 text-sm">Allow completed roads as connectors</span>
+                                </label>
+                            </div>
                             {% endif %}
                         </div>
                     </div>
@@ -183,7 +201,6 @@
         </div>
     </div>
 
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="{{ url_for('static', filename='js/main.js', v=range(0, 999999)|random) }}"></script>
     
     <!-- Profile Dropdown JavaScript -->

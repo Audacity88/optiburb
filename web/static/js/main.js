@@ -58,6 +58,7 @@ document.addEventListener('DOMContentLoaded', function() {
     let routeLayer = null;
     let segmentsLayer = null;
     let activitiesLayer = null;  // Add activities layer to track globally
+    let baseRouteLayer = null;  // New layer for the original route
 
     function initMap(center) {
         if (map) {
@@ -68,16 +69,19 @@ document.addEventListener('DOMContentLoaded', function() {
         
         // Create custom panes with explicit z-index values
         map.createPane('activitiesPane');
+        map.createPane('baseRoutePane');  // New pane for the original route
         map.createPane('routePane');
         map.createPane('segmentsPane');
         
         // Set z-index and pointer events for panes
         map.getPane('activitiesPane').style.zIndex = 300;
+        map.getPane('baseRoutePane').style.zIndex = 350;  // Between activities and route
         map.getPane('routePane').style.zIndex = 400;
         map.getPane('segmentsPane').style.zIndex = 500;
         
         // Ensure pointer events are enabled
         map.getPane('activitiesPane').style.pointerEvents = 'auto';
+        map.getPane('baseRoutePane').style.pointerEvents = 'auto';
         map.getPane('routePane').style.pointerEvents = 'auto';
         map.getPane('segmentsPane').style.pointerEvents = 'auto';
 
@@ -87,6 +91,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
         // Initialize layers with their respective panes but don't add to map yet
         activitiesLayer = L.featureGroup([], { pane: 'activitiesPane' });
+        baseRouteLayer = L.featureGroup([], { pane: 'baseRoutePane' });  // New layer for original route
         routeLayer = L.featureGroup([], { pane: 'routePane' });
         segmentsLayer = L.featureGroup([], { pane: 'segmentsPane' });
     }
@@ -123,17 +128,85 @@ document.addEventListener('DOMContentLoaded', function() {
 
                 // Add the route to the map
                 console.log('Adding route to map');
-                const routeGeoJSON = L.geoJSON(data.geojson, {
+                
+                // Create a custom arrow icon using the SVG file
+                const arrowIcon = L.divIcon({
+                    html: `<div class="direction-arrow" style="width: 24px; height: 24px;">
+                        <svg width="24" height="24" viewBox="0 0 24 24" version="1.1" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M12 2 L22 22 L12 18 L2 22 Z" 
+                                  fill="#3388ff" 
+                                  stroke="#ffffff" 
+                                  stroke-width="2"
+                                  stroke-linejoin="round"/>
+                        </svg>
+                    </div>`,
+                    className: 'direction-marker',
+                    iconSize: [24, 24],
+                    iconAnchor: [12, 12]
+                });
+                
+                console.log('Created arrow icon:', arrowIcon);
+                
+                // Add route lines first
+                const routeFeatures = data.geojson.features.filter(f => f.properties.type === 'route');
+                const directionFeatures = data.geojson.features.filter(f => f.properties.type === 'direction');
+                
+                console.log(`Found ${routeFeatures.length} route features and ${directionFeatures.length} direction features`);
+                
+                // Add original route to base route layer
+                baseRouteLayer.clearLayers();
+                
+                // First add the route lines
+                const baseRoute = L.geoJSON(routeFeatures, {
                     style: {
-                        color: '#2563eb',
+                        color: '#2563eb',  // dark blue
                         weight: 5,
-                        opacity: 1.0
+                        opacity: 1.0,
+                        pane: 'baseRoutePane'
                     }
-                }).addTo(routeLayer);
-                console.log('Added initial route to map');
-
+                }).addTo(baseRouteLayer);
+                
+                // Add base route layer to map
+                baseRouteLayer.addTo(map);
+                
+                // Then re-add direction markers
+                directionFeatures.forEach((feature, index) => {
+                    const bearing = feature.properties.bearing;
+                    const coords = feature.geometry.coordinates;
+                    
+                    console.log(`Adding direction marker ${index + 1}:`, {coords, bearing});
+                    
+                    // Fix coordinate order: Convert from [lng, lat] to [lat, lng] for Leaflet
+                    const marker = L.marker([coords[1], coords[0]], {
+                        icon: arrowIcon
+                    }).addTo(routeLayer);
+                    
+                    // Log the actual marker position for debugging
+                    console.log(`Marker ${index + 1} position:`, marker.getLatLng());
+                    
+                    // Apply rotation after marker is added
+                    marker.on('add', () => {
+                        const element = marker.getElement();
+                        if (element) {
+                            const arrowDiv = element.querySelector('.direction-arrow');
+                            if (arrowDiv) {
+                                arrowDiv.style.transform = `rotate(${bearing}deg)`;
+                                console.log(`Rotated marker ${index + 1} by ${bearing} degrees`);
+                            } else {
+                                console.warn(`Could not find arrow div for marker ${index + 1}`);
+                            }
+                        } else {
+                            console.warn(`Could not find element for marker ${index + 1}`);
+                        }
+                    });
+                });
+                
                 // Store the original route for later use
-                const originalRoute = routeGeoJSON;
+                const originalRoute = routeLayer.getLayers()[0];
+                
+                // Log layer information for debugging
+                console.log('Route layer has features:', routeLayer.getLayers().length);
+                console.log('Route layer is on map:', map.hasLayer(routeLayer));
 
                 // Force a resize event after the map is visible
                 setTimeout(() => {
@@ -208,9 +281,12 @@ document.addEventListener('DOMContentLoaded', function() {
                         if (completionData.incomplete_segments.length > 0 || completionData.completed_segments.length > 0) {
                             console.info('Updating route with completion data');
                             
-                            // Clear existing layers
-                            routeLayer.clearLayers();
+                            // Store direction markers before clearing
+                            const directionMarkers = routeLayer.getLayers().filter(layer => layer instanceof L.Marker);
+                            
+                            // Clear only the segments layer
                             segmentsLayer.clearLayers();
+                            routeLayer.clearLayers();
 
                             // Process incomplete segments
                             console.info(`Processing ${completionData.incomplete_segments.length} incomplete segments and ${completionData.completed_segments.length} completed segments`);
@@ -224,7 +300,7 @@ document.addEventListener('DOMContentLoaded', function() {
                                 const line = L.polyline(correctedCoords, {
                                     color: '#ef4444',  // red
                                     weight: 5,
-                                    opacity: 1.0,
+                                    opacity: 0.8,
                                     pane: 'segmentsPane',
                                     interactive: true
                                 });
@@ -241,19 +317,27 @@ document.addEventListener('DOMContentLoaded', function() {
                                 const line = L.polyline(correctedCoords, {
                                     color: '#22c55e',  // green
                                     weight: 5,
-                                    opacity: 1.0,
+                                    opacity: 0.8,
                                     pane: 'segmentsPane',
                                     interactive: true
                                 });
                                 line.addTo(segmentsLayer);
                             });
 
+                            // Re-add direction markers
+                            directionMarkers.forEach(marker => {
+                                marker.addTo(routeLayer);
+                            });
+
                             // Ensure proper layer order
                             activitiesLayer.remove();
+                            baseRouteLayer.remove();
                             routeLayer.remove();
                             segmentsLayer.remove();
                             
+                            // Add layers in correct order (bottom to top)
                             activitiesLayer.addTo(map);
+                            baseRouteLayer.addTo(map);
                             routeLayer.addTo(map);
                             segmentsLayer.addTo(map);
                             
@@ -263,6 +347,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
                             console.info('Layers updated:', {
                                 activities: activitiesLayer.getLayers().length,
+                                baseRoute: baseRouteLayer.getLayers().length,
                                 route: routeLayer.getLayers().length,
                                 segments: segmentsLayer.getLayers().length
                             });
@@ -296,17 +381,6 @@ document.addEventListener('DOMContentLoaded', function() {
                             collapsed: false,
                             position: 'topright'
                         }).addTo(map);
-
-                        // Add original route to route layer
-                        routeLayer.clearLayers();
-                        L.geoJSON(data.geojson, {
-                            style: {
-                                color: '#2563eb',  // blue
-                                weight: 5,
-                                opacity: 1.0,
-                                pane: 'routePane'
-                            }
-                        }).addTo(routeLayer);
 
                         // Ensure all layers are visible by default
                         map.addLayer(routeLayer);

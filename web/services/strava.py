@@ -13,8 +13,24 @@ class StravaService:
 
     @staticmethod
     def get_cache_key(access_token):
-        """Generate a unique cache key for the user's activities."""
-        return hashlib.sha256(access_token.encode()).hexdigest()
+        """Generate a unique cache key for the user's activities based on athlete ID."""
+        try:
+            # Get athlete info from the token data
+            url = "https://www.strava.com/api/v3/athlete"
+            headers = {"Authorization": f"Bearer {access_token}"}
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+            athlete_data = response.json()
+            athlete_id = str(athlete_data.get('id'))
+            
+            if not athlete_id:
+                raise ValueError("Could not get athlete ID from Strava")
+                
+            return hashlib.sha256(athlete_id.encode()).hexdigest()
+        except Exception as e:
+            logger.error(f"Error getting athlete ID: {str(e)}")
+            # Fallback to using access token if we can't get athlete ID
+            return hashlib.sha256(access_token.encode()).hexdigest()
 
     @staticmethod
     def save_activities_to_disk(access_token, activities):
