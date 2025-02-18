@@ -170,36 +170,55 @@ document.addEventListener('DOMContentLoaded', function() {
                 baseRouteLayer.addTo(map);
                 
                 // Then re-add direction markers
+                routeLayer.clearLayers(); // Clear existing markers
+                
                 directionFeatures.forEach((feature, index) => {
                     const bearing = feature.properties.bearing;
                     const coords = feature.geometry.coordinates;
                     
-                    console.log(`Adding direction marker ${index + 1}:`, {coords, bearing});
+                    console.log(`Adding direction tick ${index + 1}:`, {coords, bearing});
                     
-                    // Fix coordinate order: Convert from [lng, lat] to [lat, lng] for Leaflet
-                    const marker = L.marker([coords[1], coords[0]], {
-                        icon: arrowIcon
+                    // Convert from [lng, lat] to [lat, lng] for Leaflet
+                    const center = [coords[1], coords[0]];
+                    
+                    // Calculate base length and angles
+                    const baseLength = 0.0001; // Keep the same size
+                    const backAngle = 40; // Slightly tighter angle
+                    
+                    // Convert bearing to radians and adjust for map coordinates (-90 degree rotation)
+                    const bearingRad = (bearing * Math.PI) / 180;
+                    
+                    // Calculate the front point (tip of the arrow)
+                    const frontPoint = [
+                        center[0] + (baseLength * Math.cos(bearingRad)),
+                        center[1] + (baseLength * Math.sin(bearingRad))
+                    ];
+                    
+                    // Calculate back points with the same rotation
+                    const leftRad = bearingRad + (backAngle * Math.PI / 180);
+                    const rightRad = bearingRad - (backAngle * Math.PI / 180);
+                    
+                    const leftPoint = [
+                        center[0] + (baseLength * 0.7 * Math.cos(leftRad)),
+                        center[1] + (baseLength * 0.7 * Math.sin(leftRad))
+                    ];
+                    
+                    const rightPoint = [
+                        center[0] + (baseLength * 0.7 * Math.cos(rightRad)),
+                        center[1] + (baseLength * 0.7 * Math.sin(rightRad))
+                    ];
+                    
+                    // Create the arrow shape from front to back points
+                    const tick = L.polyline([frontPoint, center, leftPoint, center, rightPoint], {
+                        color: '#3388ff',
+                        weight: 2.5,
+                        opacity: 1.0,
+                        pane: 'routePane'
                     }).addTo(routeLayer);
-                    
-                    // Log the actual marker position for debugging
-                    console.log(`Marker ${index + 1} position:`, marker.getLatLng());
-                    
-                    // Apply rotation after marker is added
-                    marker.on('add', () => {
-                        const element = marker.getElement();
-                        if (element) {
-                            const arrowDiv = element.querySelector('.direction-arrow');
-                            if (arrowDiv) {
-                                arrowDiv.style.transform = `rotate(${bearing}deg)`;
-                                console.log(`Rotated marker ${index + 1} by ${bearing} degrees`);
-                            } else {
-                                console.warn(`Could not find arrow div for marker ${index + 1}`);
-                            }
-                        } else {
-                            console.warn(`Could not find element for marker ${index + 1}`);
-                        }
-                    });
                 });
+                
+                // Ensure routeLayer is added to map
+                routeLayer.addTo(map);
                 
                 // Store the original route for later use
                 const originalRoute = routeLayer.getLayers()[0];
@@ -281,8 +300,8 @@ document.addEventListener('DOMContentLoaded', function() {
                         if (completionData.incomplete_segments.length > 0 || completionData.completed_segments.length > 0) {
                             console.info('Updating route with completion data');
                             
-                            // Store direction markers before clearing
-                            const directionMarkers = routeLayer.getLayers().filter(layer => layer instanceof L.Marker);
+                            // Store direction ticks before clearing
+                            const directionTicks = routeLayer.getLayers();
                             
                             // Clear only the segments layer
                             segmentsLayer.clearLayers();
@@ -324,9 +343,9 @@ document.addEventListener('DOMContentLoaded', function() {
                                 line.addTo(segmentsLayer);
                             });
 
-                            // Re-add direction markers
-                            directionMarkers.forEach(marker => {
-                                marker.addTo(routeLayer);
+                            // Re-add direction ticks
+                            directionTicks.forEach(tick => {
+                                tick.addTo(routeLayer);
                             });
 
                             // Ensure proper layer order
@@ -338,8 +357,8 @@ document.addEventListener('DOMContentLoaded', function() {
                             // Add layers in correct order (bottom to top)
                             activitiesLayer.addTo(map);
                             baseRouteLayer.addTo(map);
-                            routeLayer.addTo(map);
                             segmentsLayer.addTo(map);
+                            routeLayer.addTo(map);  // Add route layer last to keep ticks on top
                             
                             // Force map update and redraw
                             map.invalidateSize();

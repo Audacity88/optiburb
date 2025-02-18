@@ -279,30 +279,35 @@ class RouteService:
                     for i, point in enumerate(segment.points):
                         coordinates.append([point.longitude, point.latitude])
                     
-                    # Add direction markers at regular intervals
+                    # Add direction markers at edge midpoints
                     if len(coordinates) >= 2:
-                        # Add a marker every 100 points or at least 3 markers for shorter routes
-                        interval = min(100, max(len(coordinates) // 3, 1))
+                        direction_points = []
                         
-                        for i in range(0, len(coordinates), interval):
-                            if i + 1 < len(coordinates):
-                                # Calculate bearing between current and next point
-                                start_point = coordinates[i]
-                                end_point = coordinates[i + 1]
-                                
-                                # Calculate bearing using geometry utility
-                                bearing = calculate_bearing(
-                                    start_point[1], start_point[0],  # lat, lon of start
-                                    end_point[1], end_point[0]       # lat, lon of end
-                                )
-                                
-                                direction_points.append({
-                                    'index': i,
-                                    'coordinates': coordinates[i],
-                                    'bearing': bearing
-                                })
-                                direction_count += 1
-                                logger.info(f"Added direction marker at point {i} with bearing {bearing}°")
+                        # Process each edge (pair of consecutive points)
+                        for i in range(len(coordinates) - 1):
+                            # Get current and next point
+                            p1 = coordinates[i]
+                            p2 = coordinates[i + 1]
+                            
+                            # Calculate point 30% along the edge
+                            point = [
+                                p1[0] + (p2[0] - p1[0]) * 0.7,  # longitude
+                                p1[1] + (p2[1] - p1[1]) * 0.7   # latitude
+                            ]
+                            
+                            # Calculate bearing between the two points
+                            bearing = calculate_bearing(
+                                p1[1], p1[0],  # lat, lon of start
+                                p2[1], p2[0]   # lat, lon of end
+                            )
+                            
+                            direction_points.append({
+                                'index': i,
+                                'coordinates': point,
+                                'bearing': bearing
+                            })
+                            direction_count += 1
+                            logger.info(f"Added direction marker at edge {i} midpoint with bearing {bearing}°")
                     
                     if not coordinates:
                         logger.warning(f"No coordinates found in track segment")
