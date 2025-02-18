@@ -8,6 +8,9 @@ from web.utils.logging import logger
 from web.config import settings
 
 class StravaService:
+    # Activity types that are relevant for road completion
+    RELEVANT_ACTIVITY_TYPES = {'Run', 'Walk', 'Hike', 'Ride', 'VirtualRide'}
+
     @staticmethod
     def get_cache_key(access_token):
         """Generate a unique cache key for the user's activities."""
@@ -52,8 +55,13 @@ class StravaService:
             if needs_update:
                 logger.info("Cached activities are older than 24 hours")
             
-            activities = data['activities']
-            logger.info(f"Loaded {len(activities)} activities from disk cache")
+            # Only include activity types that are relevant for road completion
+            activities = [
+                activity for activity in data['activities']
+                if activity.get('type') in StravaService.RELEVANT_ACTIVITY_TYPES
+            ]
+            
+            logger.info(f"Loaded {len(activities)} relevant activities from disk cache")
             return activities, needs_update
         except Exception as e:
             logger.error(f"Error loading activities from disk: {str(e)}")
@@ -82,8 +90,13 @@ class StravaService:
                 page_activities = response.json()
                 if not page_activities:
                     break
-                    
-                new_activities.extend(page_activities)
+                
+                # Filter activities by type
+                filtered_activities = [
+                    activity for activity in page_activities 
+                    if activity.get('type') in StravaService.RELEVANT_ACTIVITY_TYPES
+                ]
+                new_activities.extend(filtered_activities)
                 
                 if len(page_activities) < params['per_page']:
                     break
@@ -91,7 +104,7 @@ class StravaService:
                 page += 1
                 time.sleep(0.1)  # Rate limiting
             
-            logger.info(f"Total new activities fetched: {len(new_activities)}")
+            logger.info(f"Total new relevant activities fetched: {len(new_activities)}")
             return new_activities
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching new activities: {str(e)}")

@@ -23,7 +23,13 @@ import gpxpy
 import gpxpy.gpx
 import datetime
 
-logging.basicConfig(format='%(asctime)-15s %(filename)s:%(funcName)s:%(lineno)s [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S', level=logging.INFO)
+# Configure logging to always show warnings and errors
+logging.basicConfig(
+    format='%(asctime)-15s %(filename)s:%(funcName)s:%(lineno)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    level=logging.WARNING,
+    force=True
+)
 log = logging.getLogger(__name__)
 
 class Burbing:
@@ -186,57 +192,84 @@ class Burbing:
             i, j = pair
             shortest_paths[pair] = nx.dijkstra_path_length(g, i, j, weight='length')
 
-            ## output progress
-
+            # Only log progress every 10%
             _cur_pct = int(100 * n / _size)
-            if _prev_pct != _cur_pct:
+            if _cur_pct % 10 == 0 and _prev_pct != _cur_pct:
                 _cur_time = time.time()
-                log.info('dijkstra progress %s%%, [%d/%d] %d/second', _cur_pct, n, _size, (_prev_n - n) / (_prev_time - _cur_time))
-
+                log.info('Calculating shortest paths: %d%% complete [%d/%d]', _cur_pct, n, _size)
                 _prev_time = _cur_time
                 _prev_pct = _cur_pct
                 _prev_n = n
-                pass
-            pass
 
         return shortest_paths
 
     ##
     ##
     def augment_graph(self, pairs):
-
-        # create a new graph and stuff in the new fake/virtual edges
-        # between odd pairs.  Generate the edge metadata to make them
-        # look similar to the native edges.
-
+        """Create new edges between odd node pairs using actual road paths."""
         log.info('pre augmentation eulerian=%s', nx.is_eulerian(self.g_augmented))
-
+        
+        total_edges_added = 0
+        straight_line_edges = 0
+        
         for i, pair in enumerate(pairs):
             a, b = pair
-
-            length, path = nx.single_source_dijkstra(self.g, a, b, weight='length')
-
-            log.debug('PAIR[%s] nodes = (%s,%s), length=%s, path=%s', i, a, b, length, path)
-
-            linestring = self.path_to_linestring(self.g_augmented, path)
-
-            # create a linestring of paths...
-
-            data = {
-                'length': length,
-                'augmented': True,
-                'path': path,
-                'geometry': linestring,
-                'from': a,
-                'to': b,
-            }
-            log.debug('  creating new edge (%s,%s) - data=%s', a, b, data)
-
-            self.g_augmented.add_edge(a, b, **data)
-            pass
-
+            try:
+                # Get the shortest path between the nodes
+                length, path = nx.single_source_dijkstra(self.g, a, b, weight='length')
+                
+                log.debug('PAIR[%s] nodes = (%s,%s), length=%s, path=%s', i, a, b, length, path)
+                
+                # Create a linestring that follows the actual road path
+                linestring = self.path_to_linestring(self.g, path)
+                if linestring is None:
+                    log.warning(f"Could not create linestring for path between nodes {a}-{b}, using straight line")
+                    # Create straight line as fallback
+                    try:
+                        a_coords = (self.g.nodes[a]['x'], self.g.nodes[a]['y'])
+                        b_coords = (self.g.nodes[b]['x'], self.g.nodes[b]['y'])
+                        linestring = shapely.geometry.LineString([a_coords, b_coords])
+                        straight_line_edges += 1
+                    except (KeyError, AttributeError) as e:
+                        log.error(f"Cannot create straight line for edge {a}-{b}: {str(e)}")
+                        continue
+                
+                # Create edge data with the path geometry
+                data = {
+                    'length': length,
+                    'augmented': True,
+                    'path': path,
+                    'geometry': linestring,
+                    'from': a,
+                    'to': b,
+                }
+                
+                # Add the edge to the augmented graph
+                self.g_augmented.add_edge(a, b, **data)
+                total_edges_added += 1
+                
+                if straight_line_edges > 0:
+                    log.warning(f"Created straight line for edge {a}-{b} - STRAIGHT LINE WILL BE VISIBLE IN ROUTE")
+                else:
+                    log.info(f"Added augmented edge {a}-{b} with real road geometry")
+                    
+            except nx.NetworkXNoPath:
+                log.error(f"No path found between nodes {a}-{b}")
+                continue
+            except Exception as e:
+                log.error(f"Error creating augmented edge {a}-{b}: {str(e)}")
+                continue
+        
+        # Log summary of edge additions
+        if total_edges_added > 0:
+            log.warning(f"Augmented edge summary:")
+            log.warning(f"  - Total edges added: {total_edges_added}")
+            log.warning(f"  - Edges using straight lines: {straight_line_edges}")
+            log.warning(f"  - Edges using real geometry: {total_edges_added - straight_line_edges}")
+            if straight_line_edges > 0:
+                log.warning(f"  - {straight_line_edges} edges ({(straight_line_edges/total_edges_added)*100:.1f}%) are using straight lines!")
+        
         log.info('post augmentation eulerian=%s', nx.is_eulerian(self.g_augmented))
-
         return
 
 
@@ -258,17 +291,156 @@ class Burbing:
 
     ##
     ##
-    def determine_nodes(self):
+    def find_connecting_edges(self, components):
+        """Find the minimal set of edges needed to connect disconnected components."""
+        log.info('Finding connecting edges between components')
+        
+        # Keep track of edges we need to add
+        edges_to_add = []
+        
+        # Convert components to list for easier indexing
+        component_list = list(components)
+        
+        # Create sets of nodes for each component for faster lookup
+        component_sets = [set(comp) for comp in component_list]
+        
+        # Keep track of which components have been connected
+        connected_components = {0}  # Start with the first component
+        unconnected_components = set(range(1, len(component_list)))
+        
+        # Statistics for logging
+        total_edges_added = 0
+        straight_line_edges = 0
+        
+        while unconnected_components:
+            min_path_length = float('inf')
+            best_path = None
+            best_component = None
+            best_path_edges = None
+            
+            # Look for the shortest path connecting a connected component to an unconnected one
+            for connected_idx in connected_components:
+                connected_nodes = component_sets[connected_idx]
+                
+                for unconnected_idx in unconnected_components:
+                    unconnected_nodes = component_sets[unconnected_idx]
+                    
+                    # Try to find paths between each pair of nodes
+                    for u in connected_nodes:
+                        for v in unconnected_nodes:
+                            try:
+                                # Use the original graph (with completed roads) to find the path
+                                path_length, path = nx.single_source_dijkstra(self.g_original, u, v, weight='length')
+                                
+                                if path_length < min_path_length:
+                                    min_path_length = path_length
+                                    best_path = path
+                                    best_component = unconnected_idx
+                                    
+                                    # Get all edges along this path
+                                    path_edges = []
+                                    for i in range(len(path) - 1):
+                                        u_path, v_path = path[i], path[i + 1]
+                                        edge_data = self.g_original.get_edge_data(u_path, v_path, 0)
+                                        if edge_data:
+                                            path_edges.append((u_path, v_path, dict(edge_data)))
+                                    best_path_edges = path_edges
+                            except nx.NetworkXNoPath:
+                                continue
+            
+            if best_path is None:
+                log.error("Could not find connecting path for all components")
+                break
+            
+            # Add all edges along the best path we found
+            if best_path_edges:
+                for u, v, edge_data in best_path_edges:
+                    total_edges_added += 1
+                    # Mark this as a connecting edge
+                    edge_data['connecting'] = True
+                    
+                    # Ensure we preserve the geometry from the original edge
+                    if 'geometry' in edge_data and edge_data['geometry'] is not None:
+                        try:
+                            # Create a copy of the geometry to avoid modifying the original
+                            edge_data['geometry'] = shapely.geometry.LineString(edge_data['geometry'].coords)
+                            edges_to_add.append((u, v, edge_data))
+                            log.info(f"Adding connecting edge {u}-{v} with real road geometry")
+                        except Exception as e:
+                            log.error(f"Error copying geometry for edge {u}-{v}: {str(e)}")
+                            # Fall back to straight line if geometry copy fails
+                            straight_line_edges += 1
+                            self._add_straight_line_edge(u, v, edge_data, edges_to_add)
+                    else:
+                        # If no geometry, create a straight line
+                        straight_line_edges += 1
+                        self._add_straight_line_edge(u, v, edge_data, edges_to_add)
+            
+            # Mark the newly connected component
+            connected_components.add(best_component)
+            unconnected_components.remove(best_component)
+        
+        # Log summary of edge additions
+        if total_edges_added > 0:
+            log.warning(f"Edge connection summary:")
+            log.warning(f"  - Total edges added: {total_edges_added}")
+            log.warning(f"  - Edges using straight lines: {straight_line_edges}")
+            log.warning(f"  - Edges using real geometry: {total_edges_added - straight_line_edges}")
+            if straight_line_edges > 0:
+                log.warning(f"  - {straight_line_edges} edges ({(straight_line_edges/total_edges_added)*100:.1f}%) are using straight lines!")
+        
+        return edges_to_add
 
+    def _add_straight_line_edge(self, u, v, edge_data, edges_to_add):
+        """Helper method to add a straight line edge between two nodes."""
+        try:
+            u_coords = (self.g_original.nodes[u]['x'], self.g_original.nodes[u]['y'])
+            v_coords = (self.g_original.nodes[v]['x'], self.g_original.nodes[v]['y'])
+            edge_data['geometry'] = shapely.geometry.LineString([u_coords, v_coords])
+            edges_to_add.append((u, v, edge_data))
+            log.warning(f"Created straight line geometry for edge {u}-{v} - STRAIGHT LINE WILL BE VISIBLE IN ROUTE")
+        except Exception as e:
+            log.error(f"Error creating straight line edge {u}-{v}: {str(e)}")
+
+    ##
+    ##
+    def determine_nodes(self):
         log.info('converting directed graph to undirected')
 
-        # convert to undirected graph.  this is a bit of a hack, but
-        # it makes the problem simpler.  it means we can't guarantee
-        # the path is rideable, but we can at least get a path that
-        # covers all the roads.
-
-        self.g_directed = self.g
+        # Store the original directed graph before any modifications
+        self.g_directed = self.g.copy()
+        
+        # Convert to undirected for processing
         self.g = self.g_directed.to_undirected()
+        
+        # Find connected components
+        components = list(nx.connected_components(self.g))
+        if len(components) > 1:
+            log.warning(f'Graph has {len(components)} disconnected components')
+            # Log the size of each component
+            for i, comp in enumerate(components):
+                log.info(f'Component {i}: {len(comp)} nodes')
+            
+            # Find edges needed to connect components
+            connecting_edges = self.find_connecting_edges(components)
+            
+            # Add the connecting edges to our graph
+            for u, v, data in connecting_edges:
+                # Add edge in both directions since this is an undirected graph
+                self.g.add_edge(u, v, **data)
+                # Add reverse edge with same data
+                reverse_data = dict(data)
+                if 'geometry' in reverse_data:
+                    # Reverse the geometry for the opposite direction
+                    reverse_data['geometry'] = shapely.geometry.LineString(list(reverse_data['geometry'].coords)[::-1])
+                self.g.add_edge(v, u, **reverse_data)
+                log.debug(f'Added connecting edge {u}-{v} with geometry')
+            
+            # Verify the graph is now connected
+            if not nx.is_connected(self.g):
+                log.error("Graph is still disconnected after adding connecting edges")
+            else:
+                log.info(f"Successfully connected graph by adding {len(connecting_edges)} edges")
         
         self.print_edges(self.g)
         
@@ -469,72 +641,95 @@ class Burbing:
     ##
     ##
     def path_to_linestring(self, g, path):
-        # this creates a new linestring that follows the path of the
-        # augmented route between two odd nodes.  this is needed to
-        # force a path with the final GPX route, rather than drawing a
-        # straight line between the two odd nodes and hoping some
-        # other program route the same way we wanted to.
-
+        """Create a linestring that follows the actual road path between nodes."""
         if not path or len(path) < 2:
             log.error('Invalid path provided: must contain at least 2 nodes')
             return None
 
-        coords = []
-        prev = None
-        u = path[0]
-
-        # First, try to get coordinates for all nodes in the path
-        node_coords = {}
-        for node in path:
-            try:
-                node_coords[node] = (g.nodes[node]['x'], g.nodes[node]['y'])
-            except (KeyError, AttributeError) as e:
-                log.error(f"Missing coordinates for node {node}: {str(e)}")
-                return None
-
-        for v in path[1:]:
-            edge = (u, v)
-            log.debug('Processing edge=%s', edge)
-
-            # Get edge data
+        # Keep track of straight line usage
+        total_segments = len(path) - 1
+        straight_line_segments = 0
+        
+        # Store all coordinates that will make up the final path
+        all_coords = []
+        
+        # Process each pair of nodes in the path
+        for i in range(len(path) - 1):
+            u, v = path[i], path[i + 1]
+            
+            # Try to get edge data and geometry
             edge_data = g.get_edge_data(u, v, 0)
             if edge_data is None:
-                log.debug(f"No edge data for edge={edge}, using straight line")
-                directional_linestring = [node_coords[u], node_coords[v]]
+                log.warning(f"No edge data found for {u}-{v}, checking reverse direction")
+                edge_data = g.get_edge_data(v, u, 0)
+            
+            if edge_data and 'geometry' in edge_data and edge_data['geometry'] is not None:
+                try:
+                    # Get the geometry coordinates
+                    geom = edge_data['geometry']
+                    coords = list(geom.coords)
+                    
+                    # Check if we need to reverse the coordinates
+                    if i > 0 and len(all_coords) > 0:
+                        # Get the last point we added
+                        last_point = all_coords[-1]
+                        # Get distances to start and end of this segment
+                        start_dist = self.distance(last_point, coords[0])
+                        end_dist = self.distance(last_point, coords[-1])
+                        # Reverse if end point is closer to our last point
+                        if end_dist < start_dist:
+                            coords = coords[::-1]
+                    
+                    # Add all points except the first if this isn't the first segment
+                    # (to avoid duplicating points)
+                    if i > 0 and len(all_coords) > 0:
+                        all_coords.extend(coords[1:])
+                    else:
+                        all_coords.extend(coords)
+                        
+                    log.info(f"Using real road geometry for segment {u}-{v} with {len(coords)} points")
+                    
+                except Exception as e:
+                    log.error(f"Error processing geometry for {u}-{v}: {str(e)}")
+                    straight_line_segments += 1
+                    self._add_straight_line_segment(g, u, v, all_coords, i)
             else:
-                # Try to get geometry from edge data
-                linestring = edge_data.get('geometry')
-                if linestring is not None:
-                    directional_linestring = self.directional_linestring(edge, linestring)
-                    if directional_linestring is None:
-                        log.debug(f"Failed to get directional linestring for edge={edge}, using straight line")
-                        directional_linestring = [node_coords[u], node_coords[v]]
-                else:
-                    log.debug(f"No geometry data for edge={edge}, using straight line")
-                    directional_linestring = [node_coords[u], node_coords[v]]
-
-            # Add coordinates to the path
-            if directional_linestring:
-                for c in directional_linestring:
-                    if c == prev:
-                        continue
-                    coords.append(c)
-                    prev = c
-            else:
-                log.error(f"No valid directional_linestring for edge={edge}")
-                return None
-
-            u = v
-
-        if not coords:
-            log.error('No valid coordinates found for path')
+                log.warning(f"No geometry found for {u}-{v}, using straight line")
+                straight_line_segments += 1
+                self._add_straight_line_segment(g, u, v, all_coords, i)
+        
+        if not all_coords:
+            log.error("No coordinates generated for path")
             return None
-
+            
+        # Log summary of geometry usage
+        if straight_line_segments > 0:
+            log.warning(f"Path geometry summary:")
+            log.warning(f"  - Total segments: {total_segments}")
+            log.warning(f"  - Segments using straight lines: {straight_line_segments}")
+            log.warning(f"  - Segments using real geometry: {total_segments - straight_line_segments}")
+            log.warning(f"  - {straight_line_segments} segments ({(straight_line_segments/total_segments)*100:.1f}%) are using straight lines!")
+        
         try:
-            return shapely.geometry.LineString(coords)
+            return shapely.geometry.LineString(all_coords)
         except (ValueError, TypeError) as e:
             log.error(f"Failed to create LineString from coordinates: {str(e)}")
             return None
+
+    def _add_straight_line_segment(self, g, u, v, coords_list, segment_index):
+        """Helper method to add a straight line segment between two nodes."""
+        try:
+            u_coords = (g.nodes[u]['x'], g.nodes[u]['y'])
+            v_coords = (g.nodes[v]['x'], g.nodes[v]['y'])
+            
+            # Only add the first point if this is the first segment or coords_list is empty
+            if segment_index == 0 or not coords_list:
+                coords_list.append(u_coords)
+            coords_list.append(v_coords)
+            
+            log.warning(f"Added straight line segment for {u}-{v} - STRAIGHT LINE WILL BE VISIBLE IN ROUTE")
+        except (KeyError, AttributeError) as e:
+            log.error(f"Cannot create straight line segment for {u}-{v}: {str(e)}")
 
     ##
     ##
@@ -591,17 +786,112 @@ class Burbing:
     ##
     ##
     def load(self, options):
-
         log.info('fetching OSM data bounded by polygon')
-        self.g = osmnx.graph_from_polygon(self.region, network_type='bike', simplify=False, custom_filter=self.custom_filter)
-
+        self.g = osmnx.graph_from_polygon(self.region, network_type='bike', simplify=False, custom_filter=self.custom_filter, retain_all=True)
+        
+        # Get nodes and edges as GeoDataFrames with explicit geometry
+        nodes, edges = osmnx.utils_graph.graph_to_gdfs(self.g, nodes=True, edges=True, node_geometry=True, fill_edge_geometry=True)
+        
+        # Ensure we have node coordinates
+        if 'geometry' not in nodes.columns:
+            log.error("Node geometry is missing from GeoDataFrame")
+            raise ValueError("Node geometry is missing")
+            
+        # Extract coordinates from node geometries
+        nodes['x'] = nodes.geometry.x
+        nodes['y'] = nodes.geometry.y
+        
+        # Verify coordinates were extracted
+        missing_coords = nodes[nodes['x'].isna() | nodes['y'].isna()]
+        if not missing_coords.empty:
+            log.warning(f"Found {len(missing_coords)} nodes with missing coordinates")
+            # Try to fix missing coordinates
+            for idx in missing_coords.index:
+                try:
+                    point = nodes.at[idx, 'geometry']
+                    nodes.at[idx, 'x'] = point.x
+                    nodes.at[idx, 'y'] = point.y
+                except Exception as e:
+                    log.error(f"Could not extract coordinates for node {idx}: {str(e)}")
+        
+        # Log coordinate statistics
+        log.info(f"Node coordinate statistics:")
+        log.info(f"  - Total nodes: {len(nodes)}")
+        log.info(f"  - Nodes with x coordinates: {nodes['x'].notna().sum()}")
+        log.info(f"  - Nodes with y coordinates: {nodes['y'].notna().sum()}")
+        
+        # Recreate graph with coordinates
+        self.g = osmnx.graph_from_gdfs(nodes, edges)
+        
         log.debug('original g=%s, g=%s', self.g, type(self.g))
         log.info('original nodes=%s, edges=%s', self.g.order(), self.g.size())
+
+        # If we have completed roads and want to exclude them
+        if hasattr(self, 'completed_area') and not self.completed_area.is_empty and options.exclude_completed:
+            log.info('Removing completed roads from the network')
+            
+            # Create a buffer around the completed area
+            completed_area_buffer = self.completed_area.buffer(0.00015)  # ~15 meter buffer
+            log.info(f"Created completed area buffer: valid={completed_area_buffer.is_valid}, empty={completed_area_buffer.is_empty}, area={completed_area_buffer.area}")
+            
+            edges_processed = 0
+            edges_removed = 0
+            total_edges = len(self.g.edges())
+            
+            # Store original graph for finding connecting edges later
+            self.g_original = self.g.copy()
+            
+            # Keep track of edges to remove
+            edges_to_remove = []
+            
+            for u, v, data in list(self.g.edges(data=True)):
+                edges_processed += 1
+                
+                try:
+                    if 'geometry' not in data:
+                        continue
+                        
+                    coords = data['geometry'].coords
+                    if len(coords) < 2:
+                        continue
+                        
+                    edge_line = shapely.geometry.LineString(coords)
+                    edge_buffer = edge_line.buffer(0.00005)  # ~5 meter buffer
+                    
+                    if edge_buffer.intersects(completed_area_buffer):
+                        intersection = edge_buffer.intersection(completed_area_buffer)
+                        intersection_area = intersection.area if hasattr(intersection, 'area') else 0
+                        overlap_ratio = intersection_area / edge_buffer.area
+                        
+                        # If more than 30% completed, mark for removal
+                        if overlap_ratio > 0.3:
+                            edges_to_remove.append((u, v))
+                            edges_removed += 1
+                    
+                    # Only log progress every 500 edges
+                    if edges_processed % 500 == 0:
+                        log.info(f"Processed {edges_processed}/{total_edges} edges, marked {edges_removed} completed edges for removal")
+                        
+                except Exception as e:
+                    log.error(f"Error processing edge {u}-{v}: {str(e)}")
+                    continue
+            
+            # Remove the completed edges
+            for u, v in edges_to_remove:
+                if self.g.has_edge(u, v):
+                    self.g.remove_edge(u, v)
+                if self.g.has_edge(v, u):  # Remove reverse edge if it exists
+                    self.g.remove_edge(v, u)
+            
+            # Remove any isolated nodes that resulted from edge removal
+            self.g = osmnx.utils_graph.remove_isolated_nodes(self.g)
+            
+            log.info(f"Completed road removal: processed {edges_processed} edges, removed {edges_removed} completed edges")
+            log.info(f"Remaining nodes={self.g.order()}, edges={self.g.size()}")
 
         if options.simplify:
             log.info('simplifying graph')
             self.g = osmnx.simplification.simplify_graph(self.g, strict=False, remove_rings=False)
-            pass
 
         return
 

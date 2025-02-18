@@ -23,10 +23,24 @@
                 <div class="text-xl font-bold">OptiburB</div>
                 <div class="flex items-center space-x-4">
                     {% if 'strava_token' in session %}
-                        <span class="text-sm">Connected to Strava</span>
-                        <img src="{{ session.get('strava_token', {}).get('athlete', {}).get('profile', '') }}" 
-                             alt="Profile" 
-                             class="w-8 h-8 rounded-full">
+                        <div class="relative">
+                            <div id="profileDropdown" class="flex items-center space-x-3 cursor-pointer">
+                                <span class="text-sm">Connected to Strava</span>
+                                <img src="{{ session.get('strava_token', {}).get('athlete', {}).get('profile', '') }}" 
+                                     alt="Profile" 
+                                     class="w-8 h-8 rounded-full hover:opacity-80">
+                            </div>
+                            <div id="profileMenu" class="hidden absolute right-0 mt-2 w-48 bg-white rounded-md shadow-lg py-1 text-gray-700 z-50">
+                                <div class="px-4 py-2 text-sm border-b border-gray-200">
+                                    <div class="font-medium">{{ session.get('strava_token', {}).get('athlete', {}).get('firstname', '') }}</div>
+                                    <div class="text-gray-500 truncate">Connected with Strava</div>
+                                </div>
+                                <a href="{{ url_for('auth.strava_logout') }}" 
+                                   class="block px-4 py-2 text-sm hover:bg-gray-100 text-red-600">
+                                    Logout
+                                </a>
+                            </div>
+                        </div>
                     {% else %}
                         <a href="{{ url_for('auth.strava_login') }}" 
                            class="flex items-center px-4 py-2 bg-orange-500 hover:bg-orange-600 rounded-md transition-colors">
@@ -86,7 +100,7 @@
                             </label>
                             {% if 'strava_token' in session %}
                             <label class="flex items-center">
-                                <input type="checkbox" name="excludeCompleted" class="rounded text-blue-600">
+                                <input type="checkbox" name="excludeCompleted" class="rounded text-blue-600" checked>
                                 <span class="ml-2 text-gray-700">Exclude completed roads</span>
                             </label>
                             {% endif %}
@@ -171,6 +185,37 @@
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="{{ url_for('static', filename='js/main.js', v=range(0, 999999)|random) }}"></script>
+    
+    <!-- Profile Dropdown JavaScript -->
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const profileDropdown = document.getElementById('profileDropdown');
+            const profileMenu = document.getElementById('profileMenu');
+            
+            if (profileDropdown && profileMenu) {
+                // Toggle menu on profile click
+                profileDropdown.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    profileMenu.classList.toggle('hidden');
+                });
+                
+                // Close menu when clicking outside
+                document.addEventListener('click', (e) => {
+                    if (!profileDropdown.contains(e.target)) {
+                        profileMenu.classList.add('hidden');
+                    }
+                });
+                
+                // Close menu when pressing escape
+                document.addEventListener('keydown', (e) => {
+                    if (e.key === 'Escape') {
+                        profileMenu.classList.add('hidden');
+                    }
+                });
+            }
+        });
+    </script>
+
     {% if 'strava_token' in session and 'strava_fetch_id' in session %}
     <script>
         // Show progress modal

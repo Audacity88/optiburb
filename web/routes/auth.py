@@ -58,13 +58,13 @@ def fetch_activities():
     
     access_token = session['strava_token']['access_token']
     
-    send_progress("Activities", 30, "Checking existing activities...")
+    send_progress("Activities", 20, "Loading activity data...")
     
     # Try to load existing activities first
     existing_activities, needs_update = StravaService.load_activities_from_disk(access_token)
     
     if needs_update or not existing_activities:
-        send_progress("Activities", 40, "Fetching activities from Strava...")
+        send_progress("Activities", 40, "Fetching new activities from Strava...")
         logger.info("Fetching new activities from Strava")
         
         # If no existing activities, fetch from a very early date to get all activities
@@ -78,16 +78,15 @@ def fetch_activities():
             after_time = datetime.strptime(latest_activity.get('start_date', '1970-01-01'), '%Y-%m-%dT%H:%M:%SZ')
         
         logger.info(f"Fetching activities after {after_time}")
-        send_progress("Activities", 50, f"Fetching activities since {after_time.strftime('%Y-%m-%d')}...")
+        send_progress("Activities", 60, f"Retrieving activities since {after_time.strftime('%Y-%m-%d')}...")
         
         new_activities = StravaService.fetch_new_activities(access_token, after_time)
         
         if new_activities:
             logger.info(f"Fetched {len(new_activities)} new activities")
-            send_progress("Activities", 70, f"Found {len(new_activities)} new activities")
+            send_progress("Activities", 80, f"Processing {len(new_activities)} new activities...")
             
             if existing_activities:
-                send_progress("Activities", 80, "Combining with existing activities...")
                 # Combine existing and new activities
                 all_activities = existing_activities + new_activities
                 # Remove duplicates based on activity ID
@@ -102,7 +101,7 @@ def fetch_activities():
                 activities_to_save = new_activities
             
             # Save the combined activities
-            send_progress("Activities", 90, "Saving activities to disk...")
+            send_progress("Activities", 90, "Saving activities...")
             StravaService.save_activities_to_disk(access_token, activities_to_save)
             logger.info(f"Saved {len(activities_to_save)} activities to disk")
             send_progress("Activities", 100, f"Successfully saved {len(activities_to_save)} activities")
@@ -164,4 +163,10 @@ def strava_callback():
     logger.info("Successfully stored token in session")
     
     # Redirect to the main page immediately
+    return redirect(url_for('index'))
+
+@auth.route('/strava/logout')
+def strava_logout():
+    """Log out the user by clearing their session."""
+    session.clear()
     return redirect(url_for('index'))

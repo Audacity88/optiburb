@@ -9,6 +9,7 @@ from web.utils.geometry import create_activity_map, decode_polyline
 from optiburb import Burbing
 from shapely.geometry import LineString
 import time
+import shapely
 
 class RouteService:
     @staticmethod
@@ -25,36 +26,70 @@ class RouteService:
         logger.info(f"Filtering {len(activities)} activities for bounds: {bounds}")
         
         for activity in activities:
-            if activity.get('map', {}).get('summary_polyline'):
-                coords = decode_polyline(activity['map']['summary_polyline'])
-                if coords:
-                    # Check if any point of the activity is within bounds
-                    for lat, lng in coords:
-                        if (bounds['minLat'] <= lat <= bounds['maxLat'] and 
-                            bounds['minLng'] <= lng <= bounds['maxLng']):
-                            filtered_activities.append(activity)
-                            break
+            polyline = activity.get('map', {}).get('summary_polyline')
+            if not polyline:
+                continue
+                
+            coords = decode_polyline(polyline)
+            if not coords:
+                continue
+                
+            # Quick check using bounding box of activity
+            activity_lats = [lat for lat, _ in coords]
+            activity_lngs = [lng for _, lng in coords]
+            
+            # If activity's bounding box doesn't overlap with target bounds, skip it
+            if (min(activity_lats) > bounds['maxLat'] or 
+                max(activity_lats) < bounds['minLat'] or 
+                min(activity_lngs) > bounds['maxLng'] or 
+                max(activity_lngs) < bounds['minLng']):
+                continue
+            
+            # If we get here, the activity overlaps with our target area
+            filtered_activities.append(activity)
         
         logger.info(f"Found {len(filtered_activities)} activities in bounds")
         return filtered_activities
 
     @staticmethod
-    def generate_route(location, options, progress_queue, completed_area=None):
+    def generate_route(location, options, progress_queue, completed_area=None, existing_burbing=None):
         """Generate a route based on the given parameters."""
         try:
-            # Initialize Burbing
-            burbing = Burbing()
-            
+            # Initialize or use existing Burbing instance
+            burbing = existing_burbing if existing_burbing else Burbing()
             progress_queue.put(json.dumps({
                 'type': 'progress',
                 'step': 'Starting route generation',
                 'progress': 5,
-                'message': 'Initializing...'
+                'message': 'Initializing route generator...'
             }))
             
-            # Get polygon and add it
-            polygon = burbing.get_osm_polygon(location, select=1, buffer_dist=20)
-            burbing.add_polygon(polygon, location)
+            # Only get polygon and add it if we don't have an existing instance
+            if not existing_burbing:
+                polygon = burbing.get_osm_polygon(location, select=1, buffer_dist=20)
+                if not polygon:
+                    progress_queue.put(json.dumps({
+                        'type': 'progress',
+                        'message': 'Failed to get OSM polygon'
+                    }))
+                    return None, "Failed to get OSM polygon"
+                
+                burbing.add_polygon(polygon, location)
+                
+                # Validate polygon was added correctly
+                if not hasattr(burbing, 'polygons') or not burbing.polygons:
+                    progress_queue.put(json.dumps({
+                        'type': 'progress',
+                        'message': 'Failed to initialize area polygon'
+                    }))
+                    return None, "Failed to initialize polygons"
+                
+                progress_queue.put(json.dumps({
+                    'type': 'progress',
+                    'step': 'Area defined',
+                    'progress': 15,
+                    'message': 'Successfully defined target area'
+                }))
             
             # Set start location if provided
             if options.start:
@@ -63,75 +98,36 @@ class RouteService:
             # If we have completed roads to exclude
             if completed_area:
                 try:
-                    logger.info("Excluding completed roads from route generation")
-                    # Store original area for comparison
-                    original_area = polygon.area
-                    # Subtract completed roads from the polygon
-                    polygon = polygon.difference(completed_area)
+                    if not completed_area.is_valid:
+                        completed_area = completed_area.buffer(0)
                     
-                    # Check if we haven't excluded too much
-                    if polygon.area < (original_area * 0.1):
-                        logger.warning("Too much area would be excluded, reverting to original polygon")
+                    if not completed_area.is_empty:
+                        burbing.completed_area = completed_area
                         progress_queue.put(json.dumps({
                             'type': 'progress',
                             'step': 'Processing Strava data',
-                            'progress': 15,
-                            'message': 'Too many completed roads, using original area'
+                            'progress': 20,
+                            'message': 'Loaded completed roads data'
                         }))
-                    else:
-                        # Update the polygon in the Burbing instance
-                        burbing.polygons = [polygon]
-                        burbing.polygon_names = [location]
-                        burbing.completed_area = completed_area
                 except Exception as e:
                     logger.error(f"Error processing completed roads: {str(e)}")
-                    return None, str(e)
             
             # Load and process the graph
+            progress_queue.put(json.dumps({
+                'type': 'progress',
+                'step': 'Loading map data',
+                'progress': 25,
+                'message': 'Loading road network...'
+            }))
+            
             burbing.load(options)
             
-            # If we have completed roads to exclude, filter the graph after loading
-            if hasattr(burbing, 'completed_area'):
-                logger.info("Filtering graph to exclude completed roads")
-                edges_to_remove = []
-                total_edges = len(burbing.g.edges())
-                edges_processed = 0
-                
-                # Create a buffer around the completed area
-                completed_area_buffer = burbing.completed_area.buffer(0.00005)  # ~5 meter buffer
-                
-                for u, v, data in burbing.g.edges(data=True):
-                    edges_processed += 1
-                    
-                    try:
-                        if 'geometry' not in data:
-                            continue
-                            
-                        coords = data['geometry'].coords
-                        if len(coords) < 2:
-                            continue
-                            
-                        edge_line = LineString(coords)
-                        edge_buffer = edge_line.buffer(0.00002)  # ~2 meter buffer
-                        
-                        if edge_buffer.intersects(completed_area_buffer):
-                            intersection = edge_buffer.intersection(completed_area_buffer)
-                            intersection_area = intersection.area if hasattr(intersection, 'area') else 0
-                            overlap_ratio = intersection_area / edge_buffer.area
-                            
-                            if overlap_ratio > 0.4:
-                                edges_to_remove.append((u, v))
-                    except Exception as e:
-                        logger.warning(f"Error checking edge {u}-{v} intersection: {str(e)}")
-                        continue
-                
-                if edges_to_remove:
-                    if len(edges_to_remove) < (total_edges * 0.9):
-                        burbing.g.remove_edges_from(edges_to_remove)
-                        removed_percentage = (len(edges_to_remove) / total_edges) * 100
-                        logger.info(f"Removed {len(edges_to_remove)} completed road edges ({removed_percentage:.1f}%) from graph")
-                    else:
-                        logger.warning(f"Too many edges would be removed ({len(edges_to_remove)} of {total_edges}), keeping original graph")
+            progress_queue.put(json.dumps({
+                'type': 'progress',
+                'step': 'Calculating route',
+                'progress': 60,
+                'message': 'Determining optimal route...'
+            }))
             
             if options.prune:
                 burbing.prune()
@@ -141,18 +137,28 @@ class RouteService:
             if options.feature_deadend:
                 burbing.optimise_dead_ends()
             
+            progress_queue.put(json.dumps({
+                'type': 'progress',
+                'step': 'Finalizing route',
+                'progress': 80,
+                'message': 'Calculating final path...'
+            }))
+            
             burbing.determine_combinations()
             burbing.determine_circuit()
             
-            # Format location string
-            formatted_location = location.lower().replace(' ', '_').replace(',', '')
-            
             # Generate GPX file
+            progress_queue.put(json.dumps({
+                'type': 'progress',
+                'step': 'Creating GPX',
+                'progress': 90,
+                'message': 'Generating GPX file...'
+            }))
+            
+            formatted_location = location.lower().replace(' ', '_').replace(',', '')
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             gpx_filename = f'burb_track_{formatted_location}_{timestamp}.gpx'
             
-            # Create GPX file with full path
-            gpx_filepath = os.path.join(settings.ROOT_DIR, gpx_filename)
             burbing.create_gpx_track(burbing.g_augmented, burbing.euler_circuit, options.simplify_gpx)
             
             # Wait for the file to be created (up to 5 seconds)
@@ -165,10 +171,8 @@ class RouteService:
                     break
                 time.sleep(0.5)
                 attempt += 1
-                logger.info(f"Waiting for GPX file to be created (attempt {attempt}/{max_attempts})")
             
             if not gpx_files:
-                logger.error("No GPX files found matching the pattern after waiting")
                 raise FileNotFoundError("Generated GPX file not found")
             
             # Sort by creation time and get the most recent
@@ -180,8 +184,6 @@ class RouteService:
             
             dst_path = os.path.join(settings.UPLOAD_FOLDER, os.path.basename(src_path))
             
-            logger.info(f"Moving GPX file from {src_path} to {dst_path}")
-            
             # Ensure the UPLOAD_FOLDER exists
             os.makedirs(settings.UPLOAD_FOLDER, exist_ok=True)
             
@@ -191,20 +193,27 @@ class RouteService:
             while move_attempt < max_move_attempts:
                 try:
                     shutil.move(src_path, dst_path)
-                    logger.info(f"Successfully moved GPX file to {dst_path}")
                     break
                 except Exception as e:
                     move_attempt += 1
                     if move_attempt == max_move_attempts:
-                        logger.error(f"Failed to move GPX file after {max_move_attempts} attempts: {str(e)}")
                         raise
-                    logger.warning(f"Failed to move GPX file (attempt {move_attempt}/{max_move_attempts}): {str(e)}")
                     time.sleep(0.5)
+            
+            progress_queue.put(json.dumps({
+                'type': 'progress',
+                'step': 'Complete',
+                'progress': 100,
+                'message': 'Route generated successfully!'
+            }))
             
             return os.path.basename(src_path), None
             
         except Exception as e:
-            logger.error(f"Error in route generation: {str(e)}")
+            progress_queue.put(json.dumps({
+                'type': 'progress',
+                'message': f'Error in route generation: {str(e)}'
+            }))
             return None, str(e)
 
     @staticmethod

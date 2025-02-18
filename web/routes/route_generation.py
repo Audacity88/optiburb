@@ -11,6 +11,7 @@ from web.utils.geometry import create_activity_map, decode_polyline
 import os
 from shapely.geometry import LineString
 import gpxpy
+from optiburb import Burbing
 
 routes = Blueprint('routes', __name__)
 
@@ -60,11 +61,48 @@ def generate_route():
 
         # Check for Strava authentication and get completed area if needed
         completed_area = None
+        burbing = None
         if data.get('exclude_completed', False) and 'strava_token' in session:
+            logger.info("Exclude completed roads option is enabled")
             access_token = session['strava_token']['access_token']
+            
+            # Initialize Burbing
+            burbing = Burbing()
+            polygon = burbing.get_osm_polygon(location, select=1, buffer_dist=20)
+            burbing.add_polygon(polygon, location)
+            
+            # Get bounds from the polygon
+            minx, miny, maxx, maxy = polygon.bounds
+            logger.info(f"Area bounds: minLat={miny}, maxLat={maxy}, minLng={minx}, maxLng={maxx}")
+            
+            # Load and filter activities within bounds
             activities = StravaService.load_activities_from_disk(access_token)[0]
             if activities:
-                completed_area = create_activity_map(activities, logger)
+                logger.info(f"Found {len(activities)} total activities in cache")
+                filtered_activities = RouteService.get_user_activities(access_token, {
+                    'minLat': miny,
+                    'minLng': minx,
+                    'maxLat': maxy,
+                    'maxLng': maxx
+                }, activities)
+                
+                if filtered_activities:
+                    logger.info(f"Found {len(filtered_activities)} activities in the target area")
+                    completed_area = create_activity_map(filtered_activities, logger)
+                    if completed_area:
+                        logger.info(f"Successfully created completed area: valid={completed_area.is_valid}, empty={completed_area.is_empty}, area={completed_area.area}")
+                    else:
+                        logger.warning("Failed to create completed area from activities")
+                    progress_queue.put(json.dumps({
+                        'type': 'progress',
+                        'step': 'Processing Strava data',
+                        'progress': 10,
+                        'message': f'Found {len(filtered_activities)} activities in the area'
+                    }))
+                else:
+                    logger.warning("No activities found in the target area")
+            else:
+                logger.warning("No activities found in cache")
 
         # Convert dictionary to argparse.Namespace
         options = argparse.Namespace(
@@ -85,7 +123,7 @@ def generate_route():
         )
 
         # Generate route
-        gpx_filename, error = RouteService.generate_route(location, options, progress_queue, completed_area)
+        gpx_filename, error = RouteService.generate_route(location, options, progress_queue, completed_area, burbing)
         if error:
             return jsonify({'error': error}), 500
 

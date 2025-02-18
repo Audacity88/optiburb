@@ -38,28 +38,82 @@ def create_activity_map(activities, logger):
     """Create a map of completed streets from activities."""
     activity_lines = []
     
-    logger.info(f"Creating activity map from {len(activities)} activities")
+    logger.info(f"Processing {len(activities)} activities")
+    activities_processed = 0
+    
     for i, activity in enumerate(activities):
         if activity.get('map', {}).get('summary_polyline'):
             coords = decode_polyline(activity['map']['summary_polyline'])
-            if coords:
+            if coords and len(coords) >= 2:  # Ensure we have at least 2 points
                 try:
                     # Fix coordinate order: coords from decode_polyline are [lat, lng]
                     # Convert to [lng, lat] for LineString
                     line_coords = [[lng, lat] for lat, lng in coords]
-                    line = LineString(line_coords)
-                    # Buffer size of 10 meters (roughly 0.0001 degrees)
-                    buffered_line = line.buffer(0.0001)
+                    
+                    # Validate coordinates
+                    valid_coords = []
+                    for j, (lng, lat) in enumerate(line_coords):
+                        if -180 <= lng <= 180 and -90 <= lat <= 90:
+                            valid_coords.append([lng, lat])
+                        else:
+                            logger.warning(f"Invalid coordinate in activity {i+1}")
+                    
+                    if len(valid_coords) < 2:
+                        logger.warning(f"Not enough valid coordinates for activity {i+1}")
+                        continue
+                    
+                    line = LineString(valid_coords)
+                    
+                    # Ensure the line is valid
+                    if not line.is_valid:
+                        line = line.buffer(0).boundary
+                        if not line.is_valid:
+                            logger.warning(f"Could not fix line geometry for activity {i+1}")
+                            continue
+                    
+                    # Buffer size of 20 meters (roughly 0.0002 degrees)
+                    buffered_line = line.buffer(0.0002)
+                    
+                    if not buffered_line.is_valid:
+                        buffered_line = buffered_line.buffer(0)
+                        if not buffered_line.is_valid:
+                            logger.warning(f"Could not fix buffered geometry for activity {i+1}")
+                            continue
+                    
+                    if buffered_line.is_empty:
+                        logger.warning(f"Empty buffered geometry for activity {i+1}")
+                        continue
+                    
                     activity_lines.append(buffered_line)
-                    logger.debug(f"Added activity {i+1} to map with {len(coords)} points")
+                    activities_processed += 1
+                    
+                    # Log progress every 10 activities
+                    if activities_processed % 10 == 0:
+                        logger.info(f"Processed {activities_processed}/{len(activities)} activities")
+                        
                 except Exception as e:
                     logger.warning(f"Error processing activity {i+1}: {str(e)}")
                     continue
     
     if activity_lines:
-        logger.info(f"Successfully processed {len(activity_lines)} activities for the map")
+        logger.info(f"Successfully processed {activities_processed} activities")
         try:
             combined_map = unary_union(activity_lines)
+            
+            if not combined_map.is_valid:
+                combined_map = combined_map.buffer(0)
+                if not combined_map.is_valid:
+                    logger.error("Could not create valid activity map")
+                    return None
+            
+            if combined_map.is_empty:
+                logger.error("Combined map is empty")
+                return None
+            
+            if combined_map.area <= 0:
+                logger.error("Combined map has zero or negative area")
+                return None
+            
             return combined_map
         except Exception as e:
             logger.error(f"Error creating unified activity map: {str(e)}")
