@@ -8,6 +8,7 @@ including node balancing, dead end optimization, and finding connecting edges.
 import networkx as nx
 import shapely.geometry
 from web.utils.logging import logger
+import copy
 
 class GraphBalancer:
     def __init__(self, geometry_manager):
@@ -18,6 +19,48 @@ class GraphBalancer:
             geometry_manager (GeometryManager): Instance of GeometryManager for geometry operations
         """
         self.geometry = geometry_manager
+
+    def _copy_graph(self, graph):
+        """
+        Create a deep copy of a graph with proper handling of edge attributes.
+        
+        Args:
+            graph (nx.DiGraph): The graph to copy
+            
+        Returns:
+            nx.DiGraph: A new graph with copied nodes and edges
+        """
+        new_graph = nx.DiGraph()
+        
+        # Count edges with geometry in original graph
+        orig_edges_with_geom = sum(1 for _, _, data in graph.edges(data=True) if 'geometry' in data)
+        logger.info(f"Original graph has {graph.number_of_edges()} edges, {orig_edges_with_geom} with geometry")
+        
+        # Copy nodes with their attributes
+        for node, data in graph.nodes(data=True):
+            new_graph.add_node(node, **copy.deepcopy(data))
+        
+        # Copy edges with their attributes
+        edges_with_geom = 0
+        for u, v, data in graph.edges(data=True):
+            # Deep copy the edge data
+            edge_data = copy.deepcopy(data)
+            
+            # Special handling for geometry objects
+            if 'geometry' in data:
+                edges_with_geom += 1
+                if isinstance(data['geometry'], shapely.geometry.LineString):
+                    edge_data['geometry'] = shapely.geometry.LineString(list(data['geometry'].coords))
+                    if 'length' not in edge_data:
+                        edge_data['length'] = edge_data['geometry'].length
+            
+            new_graph.add_edge(u, v, **edge_data)
+        
+        logger.info(f"Copied graph has {new_graph.number_of_edges()} edges, {edges_with_geom} with geometry")
+        if edges_with_geom != orig_edges_with_geom:
+            logger.warning(f"Lost geometry information during graph copying!")
+        
+        return new_graph
 
     def balance_graph(self, graph, node_coords):
         """
@@ -32,99 +75,144 @@ class GraphBalancer:
         """
         logger.info('Processing directed graph for balancing')
         
-        # Add debug check at the start
-        self._debug_edge_attributes(graph)
+        # Create a working copy of the graph
+        working_graph = self._copy_graph(graph)
         
-        edges_added = 0
-        max_iterations = 100  # Prevent infinite loops
-        iteration = 0
+        # Count edges with geometry at start
+        edges_with_geom = sum(1 for _, _, data in working_graph.edges(data=True) if 'geometry' in data)
+        logger.info(f"Initial graph state: {working_graph.number_of_edges()} total edges, {edges_with_geom} with geometry")
         
-        # Find weakly connected components
-        components = list(nx.weakly_connected_components(graph))
-        if len(components) > 1:
-            logger.warning(f'Graph has {len(components)} disconnected components')
-            # Log the size of each component
-            for i, comp in enumerate(components):
-                logger.info(f'Component {i}: {len(comp)} nodes')
-            
-            # Find edges needed to connect components
-            connecting_edges = self._find_connecting_edges(graph, components, node_coords)
-            
-            # Add the connecting edges to our graph
-            for u, v, data in connecting_edges:
-                # Add edge in both directions to ensure connectivity
-                graph.add_edge(u, v, **data)
-                # Add reverse edge with same data but reversed geometry
-                reverse_data = dict(data)
-                if 'geometry' in reverse_data:
-                    reverse_data['geometry'] = shapely.geometry.LineString(
-                        list(reverse_data['geometry'].coords)[::-1]
-                    )
-                graph.add_edge(v, u, **reverse_data)
-                logger.debug(f'Added connecting edges {u}-{v} and {v}-{u} with geometry')
-        
-        # For each node, ensure in-degree equals out-degree
-        nodes_balanced = 0
-        edges_added = 0
-        
-        for node in graph.nodes():
-            in_degree = graph.in_degree(node)
-            out_degree = graph.out_degree(node)
-            
+        # First, identify all unbalanced nodes and their degrees
+        unbalanced_nodes = []
+        for node in working_graph.nodes():
+            in_degree = working_graph.in_degree(node)
+            out_degree = working_graph.out_degree(node)
             if in_degree != out_degree:
-                logger.info(f"Node {node} has imbalanced degrees: in={in_degree}, out={out_degree}")
-                # Add necessary edges to balance the node
-                if in_degree > out_degree:
-                    # Need more outgoing edges
-                    for _ in range(in_degree - out_degree):
-                        # Find a reachable node we can connect to
-                        for target in graph.nodes():
-                            if target != node and not graph.has_edge(node, target):
-                                # Try to find a path to this node
-                                try:
-                                    path = nx.shortest_path(graph, node, target, weight='length')
-                                    # Create edge following this path
-                                    if self._add_path_as_edge(graph, node, target, path, node_coords):
-                                        edges_added += 1
-                                        break
-                                except nx.NetworkXNoPath:
-                                    continue
-                elif out_degree > in_degree:
-                    # Need more incoming edges
-                    for _ in range(out_degree - in_degree):
-                        # Find a node that can reach us
-                        for source in graph.nodes():
-                            if source != node and not graph.has_edge(source, node):
-                                try:
-                                    path = nx.shortest_path(graph, source, node, weight='length')
-                                    if self._add_path_as_edge(graph, source, node, path, node_coords):
-                                        edges_added += 1
-                                        break
-                                except nx.NetworkXNoPath:
-                                    continue
+                unbalanced_nodes.append((node, in_degree, out_degree))
+                logger.info(f"Initial imbalance - Node {node}: in={in_degree}, out={out_degree}")
+
+        if not unbalanced_nodes:
+            logger.info("Graph is already balanced")
+            return working_graph
+
+        # Group nodes by whether they need incoming or outgoing edges
+        needs_incoming = []  # nodes where in_degree < out_degree
+        needs_outgoing = []  # nodes where in_degree > out_degree
+        
+        for node, in_degree, out_degree in unbalanced_nodes:
+            if in_degree < out_degree:
+                needs_incoming.extend([(node, out_degree - in_degree)])
+            else:
+                needs_outgoing.extend([(node, in_degree - out_degree)])
+
+        # Sort by the number of edges needed (descending)
+        needs_incoming.sort(key=lambda x: x[1], reverse=True)
+        needs_outgoing.sort(key=lambda x: x[1], reverse=True)
+
+        logger.info(f"Nodes needing incoming edges: {len(needs_incoming)}")
+        logger.info(f"Nodes needing outgoing edges: {len(needs_outgoing)}")
+
+        edges_added = 0
+        max_iterations = 1000
+        iteration = 0
+
+        while needs_incoming and needs_outgoing and iteration < max_iterations:
+            target_node, target_needed = needs_incoming[0]
+            source_node, source_needed = needs_outgoing[0]
+
+            try:
+                # Find shortest path between nodes
+                path = nx.shortest_path(working_graph, source_node, target_node)
                 
-                # Verify the node is now balanced
-                new_in_degree = graph.in_degree(node)
-                new_out_degree = graph.out_degree(node)
-                if new_in_degree == new_out_degree:
-                    nodes_balanced += 1
+                # Create edge data by combining geometries along the path
+                edge_data = {}
+                path_coords = []
+                path_length = 0
+                template_data = None
+                
+                # Collect all edge data along the path
+                for i in range(len(path) - 1):
+                    u, v = path[i], path[i + 1]
+                    edge = working_graph.get_edge_data(u, v)
+                    if edge:
+                        # Store the first edge data as a template
+                        if template_data is None:
+                            template_data = copy.deepcopy(edge)
+                            # Remove geometry and length from template
+                            template_data.pop('geometry', None)
+                            template_data.pop('length', None)
+                            edge_data.update(template_data)
+                        
+                        # Handle geometry and length separately
+                        if 'geometry' in edge:
+                            path_coords.extend(list(edge['geometry'].coords))
+                            path_length += edge.get('length', 0)
+
+                # Create geometry for the new edge
+                if path_coords:
+                    edge_data['geometry'] = shapely.geometry.LineString(path_coords)
+                    edge_data['length'] = path_length
                 else:
-                    logger.error(f"Failed to balance node {node}: in={new_in_degree}, out={new_out_degree}")
+                    # If no geometry found along path, create straight line
+                    u_coords = node_coords[source_node]
+                    v_coords = node_coords[target_node]
+                    edge_data['geometry'] = shapely.geometry.LineString([u_coords, v_coords])
+                    edge_data['length'] = self.geometry.calculate_distance(u_coords, v_coords)
+                    logger.debug(f"Created straight line geometry for {source_node}->{target_node}")
+
+                # Add balancing edge with complete edge data
+                working_graph.add_edge(source_node, target_node, **edge_data)
+                edges_added += 1
+
+                # Update counts and remove balanced nodes
+                needs_incoming[0] = (target_node, target_needed - 1)
+                needs_outgoing[0] = (source_node, source_needed - 1)
+
+                if target_needed == 1:
+                    needs_incoming.pop(0)
+                if source_needed == 1:
+                    needs_outgoing.pop(0)
+
+            except nx.NetworkXNoPath:
+                logger.warning(f"No path found between {source_node} and {target_node}")
+                # Create direct edge with straight line geometry
+                edge_data = {}
+                
+                # Find a template edge to copy attributes from
+                template_edge = None
+                for u, v, data in working_graph.edges(data=True):
+                    if 'geometry' in data:
+                        template_edge = copy.deepcopy(data)
+                        template_edge.pop('geometry', None)
+                        template_edge.pop('length', None)
+                        edge_data.update(template_edge)
+                        break
+                
+                # Add geometry and length
+                u_coords = node_coords[source_node]
+                v_coords = node_coords[target_node]
+                edge_data['geometry'] = shapely.geometry.LineString([u_coords, v_coords])
+                edge_data['length'] = self.geometry.calculate_distance(u_coords, v_coords)
+                
+                working_graph.add_edge(source_node, target_node, **edge_data)
+                edges_added += 1
+
+                needs_incoming[0] = (target_node, target_needed - 1)
+                needs_outgoing[0] = (source_node, source_needed - 1)
+
+                if target_needed == 1:
+                    needs_incoming.pop(0)
+                if source_needed == 1:
+                    needs_outgoing.pop(0)
+
+            iteration += 1
+
+        # Count edges with geometry after balancing
+        edges_with_geom_after = sum(1 for _, _, data in working_graph.edges(data=True) if 'geometry' in data)
+        logger.info(f"After balancing: {working_graph.number_of_edges()} total edges, {edges_with_geom_after} with geometry")
+        logger.info(f"Added {edges_added} balancing edges in {iteration} iterations")
         
-        logger.info(f"Balanced {nodes_balanced} nodes by adding {edges_added} edges")
-        
-        # Verify the graph is balanced
-        unbalanced_nodes = [(node, graph.in_degree(node), graph.out_degree(node))
-                           for node in graph.nodes()
-                           if graph.in_degree(node) != graph.out_degree(node)]
-        
-        if unbalanced_nodes:
-            logger.error("Graph is still not balanced after processing:")
-            for node, in_deg, out_deg in unbalanced_nodes:
-                logger.error(f"Node {node}: in={in_deg}, out={out_deg}")
-            raise ValueError("Failed to create a balanced directed graph")
-        
-        return graph
+        return working_graph
 
     def optimize_dead_ends(self, graph, node_coords):
         """
@@ -139,27 +227,30 @@ class GraphBalancer:
         """
         logger.info('Optimizing dead-end roads in directed graph')
         
+        # Create a working copy of the graph
+        working_graph = self._copy_graph(graph)
+        
         # Find dead ends (nodes with total degree of 1)
         deadends = set()
-        for node in graph.nodes():
-            in_degree = graph.in_degree(node)
-            out_degree = graph.out_degree(node)
+        for node in working_graph.nodes():
+            in_degree = working_graph.in_degree(node)
+            out_degree = working_graph.out_degree(node)
             if in_degree + out_degree == 1:
                 deadends.add(node)
                 logger.info(f"Found dead end at node {node}: in={in_degree}, out={out_degree}")
         
         if not deadends:
             logger.info("No dead ends found in graph")
-            return graph
+            return working_graph
         
         logger.info(f"Found {len(deadends)} dead ends to optimize")
         edges_added = 0
         
         for deadend in deadends:
             # Check incoming edges
-            in_edges = list(graph.in_edges(deadend, data=True))
+            in_edges = list(working_graph.in_edges(deadend, data=True))
             # Check outgoing edges
-            out_edges = list(graph.out_edges(deadend, data=True))
+            out_edges = list(working_graph.out_edges(deadend, data=True))
             
             if len(in_edges) + len(out_edges) != 1:
                 logger.error(f'Wrong number of edges for dead-end node {deadend}')
@@ -168,30 +259,30 @@ class GraphBalancer:
             # If we have an incoming edge, add a return edge
             if in_edges:
                 source, target, data = in_edges[0]
-                if not graph.has_edge(target, source):
-                    edge_data = dict(data)
+                if not working_graph.has_edge(target, source):
+                    edge_data = copy.deepcopy(data)
                     edge_data['augmented'] = True
                     if 'geometry' in edge_data and edge_data['geometry'] is not None:
                         # Reverse the geometry for the return edge
                         edge_data['geometry'] = shapely.geometry.LineString(
                             list(edge_data['geometry'].coords)[::-1]
                         )
-                    graph.add_edge(target, source, **edge_data)
+                    working_graph.add_edge(target, source, **edge_data)
                     edges_added += 1
                     logger.info(f"Added return edge for dead end: {target}->{source}")
             
             # If we have an outgoing edge, add a return edge
             if out_edges:
                 source, target, data = out_edges[0]
-                if not graph.has_edge(target, source):
-                    edge_data = dict(data)
+                if not working_graph.has_edge(target, source):
+                    edge_data = copy.deepcopy(data)
                     edge_data['augmented'] = True
                     if 'geometry' in edge_data and edge_data['geometry'] is not None:
                         # Reverse the geometry for the return edge
                         edge_data['geometry'] = shapely.geometry.LineString(
                             list(edge_data['geometry'].coords)[::-1]
                         )
-                    graph.add_edge(target, source, **edge_data)
+                    working_graph.add_edge(target, source, **edge_data)
                     edges_added += 1
                     logger.info(f"Added return edge for dead end: {target}->{source}")
         
@@ -199,9 +290,9 @@ class GraphBalancer:
         
         # Verify the graph remains balanced
         unbalanced_nodes = []
-        for node in graph.nodes():
-            in_degree = graph.in_degree(node)
-            out_degree = graph.out_degree(node)
+        for node in working_graph.nodes():
+            in_degree = working_graph.in_degree(node)
+            out_degree = working_graph.out_degree(node)
             if in_degree != out_degree:
                 unbalanced_nodes.append((node, in_degree, out_degree))
         
@@ -211,7 +302,7 @@ class GraphBalancer:
                 logger.error(f"Node {node}: in={in_deg}, out={out_deg}")
             raise ValueError("Failed to maintain balance during dead end optimization")
         
-        return graph
+        return working_graph
 
     def _find_connecting_edges(self, graph, components, node_coords):
         """Find the minimal set of edges needed to connect disconnected components."""

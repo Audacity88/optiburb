@@ -61,6 +61,27 @@ class GraphManager:
             except Exception as e:
                 logger.error(f"Could not extract coordinates for node {node_id}: {str(e)}")
         
+        # Transfer edge geometries from GeoDataFrame back to graph
+        edges_with_geom = 0
+        for idx, edge_data in edges.iterrows():
+            u, v, k = idx  # GeoDataFrame index contains (u, v, key)
+            if 'geometry' in edge_data and edge_data['geometry'] is not None:
+                # Get existing edge data
+                edge_attrs = self.g.get_edge_data(u, v, k).copy()
+                # Add geometry
+                edge_attrs['geometry'] = edge_data['geometry']
+                # Add length if not present
+                if 'length' not in edge_attrs:
+                    edge_attrs['length'] = edge_data['geometry'].length
+                # Update edge in graph
+                self.g.remove_edge(u, v)
+                self.g.add_edge(u, v, **edge_attrs)
+                edges_with_geom += 1
+        
+        logger.info(f"Edge geometry statistics:")
+        logger.info(f"  - Total edges: {len(edges)}")
+        logger.info(f"  - Edges with geometry: {edges_with_geom}")
+        
         # Log coordinate statistics
         nodes_with_coords = sum(1 for n in self.g.nodes if 'x' in self.g.nodes[n] and 'y' in self.g.nodes[n])
         logger.info(f"Node coordinate statistics:")

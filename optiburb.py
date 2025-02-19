@@ -13,6 +13,7 @@ import datetime
 import logging
 import os
 import shapely.geometry
+import networkx as nx
 from web.core import (
     GraphManager,
     GraphBalancer,
@@ -96,7 +97,8 @@ class Burbing:
         # Use the route generator to find the circuit
         self.euler_circuit = self.route_generator.determine_circuit(
             self.graph_manager.g_augmented,
-            self.start
+            self.start,
+            completed_area=self.completed_area if hasattr(self, 'completed_area') else None
         )
 
     def create_gpx_track(self, simplify=False):

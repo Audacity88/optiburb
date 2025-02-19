@@ -13,6 +13,7 @@ import networkx as nx
 from web.utils.logging import logger
 import os
 from web.config import settings
+import shapely
 
 class RouteGenerator:
     def __init__(self, geometry_manager):
@@ -25,18 +26,222 @@ class RouteGenerator:
         self.geometry = geometry_manager
         self.euler_circuit = None
 
-    def determine_circuit(self, graph, start_node=None):
+    def filter_completed_roads(self, graph, completed_area):
+        """
+        Filter out completed roads from the graph while maintaining balance.
+        
+        Args:
+            graph (nx.DiGraph): The graph to filter
+            completed_area (shapely.geometry.Polygon): The area of completed roads
+            
+        Returns:
+            nx.DiGraph: The filtered graph
+        """
+        if not completed_area:
+            logger.warning("No completed area provided - skipping filtering")
+            return graph
+
+        logger.info("=== Starting completed roads filtering ===")
+        
+        # Create a buffer around the completed area (15 meters)
+        completed_buffer = completed_area.buffer(0.00015)  # ~15 meter buffer
+        if completed_buffer.is_empty:
+            logger.error("Completed area buffer is empty - no filtering will be done")
+            return graph
+
+        # First pass: identify completed and uncompleted edges
+        total_edges = graph.number_of_edges()
+        edges_with_geometry = 0
+        edges_intersecting = 0
+        high_overlap_edges = 0
+        
+        # Track completed and uncompleted edges separately
+        completed_pairs = {}  # {frozenset(u,v): (edge1, edge2)} for completed bidirectional edges
+        uncompleted_edges = set()  # Edges that need to be preserved
+        nodes_with_uncompleted = set()  # Nodes that have uncompleted edges
+        
+        # First identify all uncompleted edges and their nodes
+        for u, v, data in graph.edges(data=True):
+            if 'geometry' in data:
+                edges_with_geometry += 1
+                edge_geom = data['geometry']
+            else:
+                # Create straight line geometry if none exists
+                try:
+                    u_coords = (graph.nodes[u]['x'], graph.nodes[u]['y'])
+                    v_coords = (graph.nodes[v]['x'], graph.nodes[v]['y'])
+                    edge_geom = shapely.geometry.LineString([u_coords, v_coords])
+                except (KeyError, AttributeError) as e:
+                    logger.error(f"Cannot create geometry for edge {u}-{v}: {str(e)}")
+                    continue
+            
+            # Create buffer around edge (5 meters)
+            edge_buffer = edge_geom.buffer(0.00005)
+            if not edge_buffer.is_valid:
+                edge_buffer = edge_buffer.buffer(0)
+            
+            if edge_buffer.intersects(completed_buffer):
+                edges_intersecting += 1
+                intersection = edge_buffer.intersection(completed_buffer)
+                if not intersection.is_valid:
+                    intersection = intersection.buffer(0)
+                
+                # Calculate overlap ratio based on area
+                intersection_area = intersection.area if hasattr(intersection, 'area') else 0
+                edge_area = edge_buffer.area if edge_buffer.area > 0 else 1e-10
+                overlap_ratio = intersection_area / edge_area
+                
+                # If more than 70% completed, check for bidirectional completion
+                if overlap_ratio > 0.7:
+                    high_overlap_edges += 1
+                    edge_pair = frozenset([u, v])
+                    
+                    # If we have a reverse edge, check if it's also completed
+                    if graph.has_edge(v, u):
+                        rev_data = graph.get_edge_data(v, u)
+                        rev_geom = rev_data.get('geometry', edge_geom)
+                        rev_buffer = rev_geom.buffer(0.00005)
+                        rev_intersection = rev_buffer.intersection(completed_buffer)
+                        rev_overlap = rev_intersection.area / rev_buffer.area if rev_buffer.area > 0 else 0
+                        
+                        if rev_overlap > 0.7:
+                            # Both directions are completed
+                            completed_pairs[edge_pair] = ((u, v), (v, u))
+                        else:
+                            # Only one direction completed, must preserve both
+                            uncompleted_edges.add((u, v))
+                            uncompleted_edges.add((v, u))
+                            nodes_with_uncompleted.add(u)
+                            nodes_with_uncompleted.add(v)
+                    else:
+                        # Single direction edge, mark as uncompleted to preserve balance
+                        uncompleted_edges.add((u, v))
+                        nodes_with_uncompleted.add(u)
+                        nodes_with_uncompleted.add(v)
+                else:
+                    uncompleted_edges.add((u, v))
+                    nodes_with_uncompleted.add(u)
+                    nodes_with_uncompleted.add(v)
+            else:
+                uncompleted_edges.add((u, v))
+                nodes_with_uncompleted.add(u)
+                nodes_with_uncompleted.add(v)
+
+        logger.info(f"Edge analysis:")
+        logger.info(f"  - Total edges: {total_edges}")
+        logger.info(f"  - Edges with geometry: {edges_with_geometry}")
+        logger.info(f"  - Edges intersecting completed area: {edges_intersecting}")
+        logger.info(f"  - Edges with high overlap (>70%): {high_overlap_edges}")
+        logger.info(f"  - Completed edge pairs: {len(completed_pairs)}")
+        logger.info(f"  - Uncompleted edges to preserve: {len(uncompleted_edges)}")
+        logger.info(f"  - Nodes with uncompleted edges: {len(nodes_with_uncompleted)}")
+        
+        # Create a subgraph of uncompleted edges to find connected regions
+        uncompleted_graph = nx.DiGraph()
+        for u, v in uncompleted_edges:
+            edge_data = graph.get_edge_data(u, v)
+            uncompleted_graph.add_edge(u, v, **edge_data)
+        
+        # Find weakly connected components (regions of uncompleted edges)
+        uncompleted_components = list(nx.weakly_connected_components(uncompleted_graph))
+        logger.info(f"Found {len(uncompleted_components)} regions of uncompleted edges")
+        
+        # Create filtered graph starting with uncompleted edges
+        filtered_graph = nx.DiGraph()
+        
+        # Add all uncompleted edges first
+        for u, v in uncompleted_edges:
+            edge_data = graph.get_edge_data(u, v)
+            filtered_graph.add_edge(u, v, **edge_data)
+        
+        # For each pair of components, find the shortest connecting path
+        paths_to_add = set()
+        for i in range(len(uncompleted_components)):
+            for j in range(i + 1, len(uncompleted_components)):
+                comp1 = uncompleted_components[i]
+                comp2 = uncompleted_components[j]
+                
+                # Find the shortest path between any pair of nodes in the two components
+                min_path_length = float('inf')
+                best_path = None
+                
+                for source in comp1:
+                    for target in comp2:
+                        try:
+                            path = nx.shortest_path(graph, source, target, weight='length')
+                            path_length = sum(graph[path[k]][path[k+1]].get('length', 1) 
+                                            for k in range(len(path)-1))
+                            
+                            if path_length < min_path_length:
+                                min_path_length = path_length
+                                best_path = path
+                        except nx.NetworkXNoPath:
+                            continue
+                
+                if best_path:
+                    # Add edges from the shortest path
+                    for k in range(len(best_path) - 1):
+                        u, v = best_path[k], best_path[k + 1]
+                        edge_pair = frozenset([u, v])
+                        
+                        # If this is a completed pair, add both directions
+                        if edge_pair in completed_pairs:
+                            paths_to_add.add(completed_pairs[edge_pair][0])
+                            paths_to_add.add(completed_pairs[edge_pair][1])
+                        else:
+                            paths_to_add.add((u, v))
+                            # If reverse edge exists and isn't completed, add it too
+                            if graph.has_edge(v, u) and frozenset([v, u]) not in completed_pairs:
+                                paths_to_add.add((v, u))
+        
+        # Add all required paths
+        for u, v in paths_to_add:
+            if not filtered_graph.has_edge(u, v):
+                edge_data = graph.get_edge_data(u, v)
+                filtered_graph.add_edge(u, v, **edge_data)
+        
+        # Verify balance
+        unbalanced_nodes = []
+        for node in filtered_graph.nodes():
+            in_degree = filtered_graph.in_degree(node)
+            out_degree = filtered_graph.out_degree(node)
+            if in_degree != out_degree:
+                unbalanced_nodes.append((node, in_degree, out_degree))
+        
+        if unbalanced_nodes:
+            logger.warning(f"Found {len(unbalanced_nodes)} unbalanced nodes after filtering, reverting changes")
+            return graph
+        
+        # Verify connectivity
+        if not nx.is_weakly_connected(filtered_graph):
+            logger.warning("Graph became disconnected after filtering, reverting changes")
+            return graph
+        
+        edges_removed = total_edges - filtered_graph.number_of_edges()
+        logger.info(f"Successfully removed {edges_removed} completed road segments")
+        logger.info(f"Final graph has {filtered_graph.number_of_edges()} edges")
+        logger.info("=== Completed roads filtering finished ===")
+        
+        return filtered_graph
+
+    def determine_circuit(self, graph, start_node=None, completed_area=None):
         """
         Determine the Eulerian circuit in the directed graph.
         
         Args:
             graph (nx.DiGraph): The graph to find the circuit in
             start_node: Optional starting node
+            completed_area: Optional shapely.geometry.Polygon of completed roads to exclude
             
         Returns:
             list: The Eulerian circuit as a list of node pairs
         """
         logger.info('Starting to find Eulerian circuit in directed graph')
+        
+        # Filter out completed roads if requested
+        if completed_area is not None:
+            graph = self.filter_completed_roads(graph, completed_area)
+            logger.info(f"Working with filtered graph containing {graph.number_of_edges()} edges")
         
         # If no start node specified, use any node
         if start_node is None:
@@ -268,8 +473,8 @@ class RouteGenerator:
             return None
 
         direction_markers_added = 0
-        logger.info(f'Adding track points for segment starting at index {start_index}, interval={arrow_interval}')
-        logger.info(f'Number of coordinates to process: {len(coords)}')
+        logger.debug(f'Adding track points for segment starting at index {start_index}, interval={arrow_interval}')
+        logger.debug(f'Number of coordinates to process: {len(coords)}')
         
         # For very short segments (2 points), always add a direction marker at the first point
         is_short_segment = len(coords) == 2
@@ -296,11 +501,11 @@ class RouteGenerator:
                     point.comment = str(round(bearing, 1))
                     
                     direction_markers_added += 1
-                    logger.info(f'Added direction marker at point {start_index + i}: bearing={bearing}°, coords=({lat}, {lon})')
+                    logger.debug(f'Added direction marker at point {start_index + i}: bearing={bearing}°, coords=({lat}, {lon})')
                 
                 segment.points.append(point)
             
-            logger.info(f'Added {direction_markers_added} direction markers in this segment')
+            logger.debug(f'Added {direction_markers_added} direction markers in this segment')
             if direction_markers_added == 0:
                 logger.warning('No direction markers were added in this segment')
                 logger.warning(f'Segment details: start_index={start_index}, coords={len(coords)}, interval={arrow_interval}')

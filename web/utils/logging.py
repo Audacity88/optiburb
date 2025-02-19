@@ -2,24 +2,41 @@ import logging
 import json
 import queue
 from logging import Handler
+import sys
 
 def setup_logging():
     """Configure logging for the application."""
     # Get the logger
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger('web.utils.logging')
     
     # Clear any existing handlers
     logger.handlers = []
     
     # Set the level
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
 
-    # Add a single stream handler
-    handler = logging.StreamHandler()
-    handler.setLevel(logging.DEBUG)
+    # Create console handler and set level to debug
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+
+    # Create formatter
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+
+    # Add formatter to console handler
+    console_handler.setFormatter(formatter)
+
+    # Add console handler to logger
+    logger.addHandler(console_handler)
+
+    # Set specific log levels for different components
+    logging.getLogger('web.core.route').setLevel(logging.INFO)
+    logging.getLogger('web.core.geometry').setLevel(logging.INFO)
+    logging.getLogger('web.services.route').setLevel(logging.INFO)
+
+    # Suppress detailed logging from libraries
+    logging.getLogger('gpxpy').setLevel(logging.WARNING)
+    logging.getLogger('networkx').setLevel(logging.WARNING)
+    logging.getLogger('shapely').setLevel(logging.WARNING)
 
     # Prevent propagation to root logger to avoid duplicates
     logger.propagate = False
