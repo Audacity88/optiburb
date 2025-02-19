@@ -10,6 +10,7 @@ import re
 import osmnx
 import geopandas
 import shapely.geometry
+import math
 from web.utils.logging import logger
 
 class DataLoader:
@@ -57,16 +58,24 @@ class DataLoader:
         """
         logger.info('searching for query=%s, which_result=%s', location, select)
 
-        # First get the coordinates
-        location_coords = osmnx.geocoder.geocode(location)
-        if not location_coords:
-            raise ValueError(f"Could not find location: {location}")
+        try:
+            # First get the coordinates using Nominatim geocoder
+            location_coords = osmnx.geocode(location)
+            if location_coords is None:
+                raise ValueError(f"Could not find location: {location}")
             
-        # Create a point and buffer it - using a larger buffer distance
-        point = shapely.geometry.Point(location_coords[1], location_coords[0])  # lon, lat
-        polygon = point.buffer(500 / 111000)  # Convert meters to degrees (roughly)
+            # Ensure we have numeric coordinates
+            lat, lon = float(location_coords[0]), float(location_coords[1])
+            logger.info(f"Found coordinates: lat={lat}, lon={lon}")
+            
+            # Create a point and buffer it - using a larger buffer distance
+            point = shapely.geometry.Point(lon, lat)  # lon, lat order for Point
+            polygon = point.buffer(500 / 111000)  # Convert meters to degrees (roughly)
 
-        return polygon
+            return polygon
+        except Exception as e:
+            logger.error(f"Error geocoding location '{location}': {str(e)}")
+            raise
 
     def load_shapefile(self, filename):
         """
@@ -108,17 +117,56 @@ class DataLoader:
 
     def get_nearest_node(self, g, point, return_dist=True):
         """
-        Find the nearest node in the graph to a given point.
+        Find the nearest node in the graph to a given point using direct distance calculations.
         
         Args:
             g (networkx.Graph): The graph to search in
             point (tuple): The point coordinates (lat, lon)
-            return_dist (bool): Whether to return the distance to the node
+            return_dist (bool): Whether to return the distance
             
         Returns:
-            tuple: The nearest node ID and optionally the distance
+            int or str or tuple: The nearest node ID, or (node_id, distance) if return_dist is True
         """
-        return osmnx.distance.get_nearest_node(g, point, return_dist=return_dist)
+        try:
+            # Convert coordinates to float
+            lat, lon = float(point[0]), float(point[1])
+            
+            # Find nearest node by calculating distances to all nodes
+            min_dist = float('inf')
+            nearest_node = None
+            
+            for node, data in g.nodes(data=True):
+                # Get node coordinates
+                if 'x' not in data or 'y' not in data:
+                    continue
+                    
+                # Calculate Haversine distance
+                node_lat = data['y']  # Note: y is latitude
+                node_lon = data['x']  # Note: x is longitude
+                
+                # Calculate distance using Haversine formula
+                R = 6371000  # Earth's radius in meters
+                lat1, lat2 = math.radians(lat), math.radians(node_lat)
+                dlat = math.radians(node_lat - lat)
+                dlon = math.radians(node_lon - lon)
+                
+                a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+                c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+                distance = R * c
+                
+                if distance < min_dist:
+                    min_dist = distance
+                    nearest_node = node
+            
+            if nearest_node is None:
+                raise ValueError("No valid nodes found in graph")
+                
+            # Only return the node ID if return_dist is False
+            return (nearest_node, min_dist) if return_dist else nearest_node
+            
+        except (ValueError, TypeError) as e:
+            logger.error(f"Invalid coordinates format: {point}. Error: {str(e)}")
+            raise ValueError(f"Invalid coordinates. Expected numeric lat/lon values, got {point}")
 
     def process_name(self, name):
         """

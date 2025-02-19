@@ -117,7 +117,6 @@ def generate_route():
             simplify=data.get('simplify', False),
             prune=data.get('prune', False),
             simplify_gpx=data.get('simplify_gpx', True),
-            feature_deadend=data.get('feature_deadend', False),
             exclude_completed=data.get('exclude_completed', False),
             debug='info',
             start=start_point,

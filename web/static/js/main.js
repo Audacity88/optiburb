@@ -581,7 +581,6 @@ document.addEventListener('DOMContentLoaded', function() {
             simplify: document.querySelector('input[name="simplify"]').checked,
             prune: document.querySelector('input[name="prune"]').checked,
             simplify_gpx: document.querySelector('input[name="simplifyGpx"]').checked,
-            feature_deadend: document.querySelector('input[name="featureDeadend"]').checked,
             exclude_completed: document.querySelector('input[name="excludeCompleted"]')?.checked || false,
             session_id: sessionId
         };

@@ -82,6 +82,16 @@ class GraphBalancer:
         edges_with_geom = sum(1 for _, _, data in working_graph.edges(data=True) if 'geometry' in data)
         logger.info(f"Initial graph state: {working_graph.number_of_edges()} total edges, {edges_with_geom} with geometry")
         
+        # Validate node IDs
+        invalid_nodes = []
+        for node in working_graph.nodes():
+            if not isinstance(node, (int, str)):
+                invalid_nodes.append(node)
+                logger.error(f"Invalid node ID type: {type(node)} for node {node}")
+        
+        if invalid_nodes:
+            raise ValueError(f"Found {len(invalid_nodes)} invalid node IDs. Node IDs must be integers or strings.")
+        
         # First, identify all unbalanced nodes and their degrees
         unbalanced_nodes = []
         for node in working_graph.nodes():
@@ -206,6 +216,16 @@ class GraphBalancer:
                     needs_outgoing.pop(0)
 
             iteration += 1
+
+        # Verify all edges have proper node IDs
+        invalid_edges = []
+        for u, v in working_graph.edges():
+            if not (isinstance(u, (int, str)) and isinstance(v, (int, str))):
+                invalid_edges.append((u, v))
+                logger.error(f"Invalid edge: {u}->{v}")
+        
+        if invalid_edges:
+            raise ValueError(f"Found {len(invalid_edges)} invalid edges after balancing. Edge nodes must be integers or strings.")
 
         # Count edges with geometry after balancing
         edges_with_geom_after = sum(1 for _, _, data in working_graph.edges(data=True) if 'geometry' in data)

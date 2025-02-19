@@ -22,6 +22,7 @@ from web.core import (
     DataLoader
 )
 from web.utils.logging import logger
+import osmnx
 
 class Burbing:
     WARNING = '''Note: This program now considers one-way streets and road directionality. Please still verify routes for safety.'''
@@ -39,6 +40,7 @@ class Burbing:
         self.region = shapely.geometry.Polygon()
         self.name = ''
         self.start = None
+        self.start_addr = None  # Store the start address
         self.polygons = {}
 
         logger.warning(self.WARNING)
@@ -55,9 +57,27 @@ class Burbing:
         self.name += processed_name
 
     def set_start_location(self, addr):
-        """Set the starting location for the route."""
-        self.start = self.data_loader.get_nearest_node(self.graph_manager.g, addr)
-        logger.info('setting start point to %s', self.start)
+        """Store the starting location address for later use."""
+        self.start_addr = addr
+        logger.info('Stored start address: %s', addr)
+
+    def _set_start_node(self):
+        """Set the start node after the graph is loaded."""
+        if not self.start_addr:
+            return
+        
+        try:
+            # First geocode the address to get coordinates
+            coords = osmnx.geocode(self.start_addr)
+            if coords is None:
+                raise ValueError(f"Could not find location: {self.start_addr}")
+            
+            # Find nearest node using the coordinates, don't return distance
+            self.start = self.data_loader.get_nearest_node(self.graph_manager.g, coords, return_dist=False)
+            logger.info('Set start point to %s (address: %s)', self.start, self.start_addr)
+        except Exception as e:
+            logger.error(f"Error setting start location: {str(e)}")
+            raise ValueError(f"Could not set start location: {str(e)}")
 
     def load(self, options):
         """Load and prepare the graph data."""
@@ -69,22 +89,15 @@ class Burbing:
 
         if options.prune:
             self.graph_manager.prune_graph()
+            
+        # Set the start node after the graph is loaded
+        if self.start_addr:
+            self._set_start_node()
 
     def determine_nodes(self):
         """Balance the graph to ensure it can support an Eulerian circuit."""
         # Balance the graph using the graph balancer
         self.graph_manager.g_working = self.balancer.balance_graph(
-            self.graph_manager.g_working,
-            self.graph_manager.node_coords
-        )
-        
-        # Update the augmented graph
-        self.graph_manager.g_augmented = self.graph_manager.g_working.copy()
-
-    def optimize_dead_ends(self):
-        """Optimize dead-end roads in the graph."""
-        # Optimize dead ends using the graph balancer
-        self.graph_manager.g_working = self.balancer.optimize_dead_ends(
             self.graph_manager.g_working,
             self.graph_manager.node_coords
         )
@@ -128,7 +141,6 @@ def main():
     parser.add_argument('--shapefile', type=str, default=None, help='filename of shapefile to load localities, comma separated by the column to match on')
     parser.add_argument('--buffer', type=int, dest='buffer', default=20, help='buffer distance around polygon')
     parser.add_argument('--save-fig', default=False, action='store_true', help='save an SVG image of the nodes and edges')
-    parser.add_argument('--feature-deadend', default=False, action='store_true', help='experimental feature to optimize deadends in solution')
 
     args = parser.parse_args()
 
@@ -163,9 +175,6 @@ def main():
         burbing.save_visualization()
 
     burbing.determine_nodes()
-
-    if args.feature_deadend:
-        burbing.optimize_dead_ends()
 
     burbing.determine_circuit()
 

@@ -149,13 +149,6 @@ class RouteService:
                 logger.error(f"Error determining nodes: {str(e)}")
                 return None, f"Error processing graph nodes: {str(e)}"
             
-            if options.feature_deadend:
-                try:
-                    burbing.optimize_dead_ends()
-                except Exception as e:
-                    logger.error(f"Error optimizing dead ends: {str(e)}")
-                    # Continue even if dead end optimization fails
-            
             progress_queue.put(json.dumps({
                 'type': 'progress',
                 'step': 'Finding circuit',
