@@ -1707,6 +1707,168 @@ class Burbing:
                     }
                     log.info(f"Fixed edge {u}-{v} attributes")
 
+    def _are_roads_parallel(self, line1, line2, max_distance=0.0003):  # roughly 30 meters
+        """Check if two roads are parallel and close to each other."""
+        try:
+            # Buffer both lines slightly and check if they overlap
+            buffer1 = line1.buffer(max_distance/2)
+            buffer2 = line2.buffer(max_distance/2)
+            
+            # Check if the buffers overlap significantly
+            if not buffer1.intersects(buffer2):
+                return False
+                
+            # Calculate overlap ratio
+            intersection = buffer1.intersection(buffer2)
+            if not intersection.is_valid:
+                intersection = intersection.buffer(0)
+            
+            # Calculate overlap ratio relative to the smaller buffer
+            overlap_ratio = intersection.area / min(buffer1.area, buffer2.area)
+            if overlap_ratio < 0.3:  # Require at least 30% overlap
+                return False
+            
+            # Get evenly spaced points along both lines for better bearing comparison
+            num_points = 4  # Check bearings at more points along the lines
+            points1 = [line1.interpolate(i/float(num_points-1), normalized=True) for i in range(num_points)]
+            points2 = [line2.interpolate(i/float(num_points-1), normalized=True) for i in range(num_points)]
+            
+            # Compare bearings at multiple points
+            max_bearing_diff = 0
+            for i in range(num_points-1):
+                # Calculate bearing for line1
+                bearing1 = self._calculate_bearing(
+                    points1[i].y, points1[i].x,
+                    points1[i+1].y, points1[i+1].x
+                )
+                
+                # Calculate bearing for line2
+                bearing2 = self._calculate_bearing(
+                    points2[i].y, points2[i].x,
+                    points2[i+1].y, points2[i+1].x
+                )
+                
+                # Calculate bearing difference
+                bearing_diff = abs((bearing1 - bearing2 + 180) % 360 - 180)
+                max_bearing_diff = max(max_bearing_diff, bearing_diff)
+            
+            # Allow more tolerance for parallel roads (30 degrees)
+            # Also accept nearly parallel roads (within 30 degrees of 180)
+            return max_bearing_diff < 30 or abs(max_bearing_diff - 180) < 30
+            
+        except Exception as e:
+            log.warning(f"Error checking parallel roads: {str(e)}")
+            return False
+
+    def merge_parallel_roads(self):
+        """Identify and merge parallel bidirectional roads."""
+        if not self.g:
+            return
+        
+        log.info("Identifying parallel bidirectional roads...")
+        edges_to_remove = set()
+        edges_processed = set()
+        
+        # Get all edges with geometry
+        edges = [(u, v, d) for u, v, d in self.g.edges(data=True) if 'geometry' in d]
+        
+        # First pass: identify parallel roads that are part of the same named road
+        for i, (u1, v1, d1) in enumerate(edges):
+            if (u1, v1) in edges_processed:
+                continue
+                
+            geometry1 = d1['geometry']
+            if not isinstance(geometry1, LineString):
+                continue
+            
+            road_name1 = d1.get('name')
+            
+            # Look for parallel roads
+            for u2, v2, d2 in edges[i+1:]:
+                if (u2, v2) in edges_processed:
+                    continue
+                    
+                geometry2 = d2['geometry']
+                if not isinstance(geometry2, LineString):
+                    continue
+                
+                road_name2 = d2.get('name')
+                
+                # Prioritize merging roads with the same name
+                if road_name1 and road_name1 == road_name2:
+                    if self._are_roads_parallel(geometry1, geometry2, max_distance=0.0004):  # 40 meters for same-named roads
+                        self._merge_road_pair(u1, v1, u2, v2, d1, d2, edges_to_remove, edges_processed)
+        
+        # Second pass: identify other parallel roads (like parking lots, service roads)
+        for i, (u1, v1, d1) in enumerate(edges):
+            if (u1, v1) in edges_processed:
+                continue
+                
+            geometry1 = d1['geometry']
+            if not isinstance(geometry1, LineString):
+                continue
+            
+            highway_type1 = d1.get('highway')
+            
+            # Look for parallel roads
+            for u2, v2, d2 in edges[i+1:]:
+                if (u2, v2) in edges_processed:
+                    continue
+                    
+                geometry2 = d2['geometry']
+                if not isinstance(geometry2, LineString):
+                    continue
+                
+                highway_type2 = d2.get('highway')
+                
+                # Use different distance thresholds based on road types
+                max_distance = 0.0003  # default 30 meters
+                if highway_type1 == highway_type2 == 'service':
+                    max_distance = 0.0004  # 40 meters for service roads
+                elif 'parking' in str(d1.get('service', '')) or 'parking' in str(d2.get('service', '')):
+                    max_distance = 0.0005  # 50 meters for parking areas
+                
+                if self._are_roads_parallel(geometry1, geometry2, max_distance=max_distance):
+                    self._merge_road_pair(u1, v1, u2, v2, d1, d2, edges_to_remove, edges_processed)
+        
+        # Remove the redundant edges
+        for u, v in edges_to_remove:
+            if self.g.has_edge(u, v):
+                self.g.remove_edge(u, v)
+        
+        log.info(f"Merged {len(edges_to_remove)//2} pairs of parallel bidirectional roads")
+
+    def _merge_road_pair(self, u1, v1, u2, v2, d1, d2, edges_to_remove, edges_processed):
+        """Helper method to merge a pair of parallel roads."""
+        # Check if they form a bidirectional pair
+        if (self.g.has_edge(v1, u1) and self.g.has_edge(v2, u2)) or \
+           (self.g.has_edge(u2, u1) and self.g.has_edge(v2, v1)):
+            # Merge the roads by keeping one direction and removing the other
+            edges_to_remove.add((u2, v2))
+            edges_to_remove.add((v2, u2))
+            edges_processed.add((u1, v1))
+            edges_processed.add((v1, u1))
+            
+            # Update the kept edge to indicate it's bidirectional
+            self.g[u1][v1]['bidirectional'] = True
+            
+            # Merge road names if available
+            names = set()
+            if 'name' in d1 and d1['name']:
+                names.add(d1['name'])
+            if 'name' in d2 and d2['name']:
+                names.add(d2['name'])
+            if names:
+                self.g[u1][v1]['merged_names'] = names
+            
+            # Mark the type of merge
+            if 'parking' in str(d1.get('service', '')) or 'parking' in str(d2.get('service', '')):
+                self.g[u1][v1]['merge_type'] = 'parking'
+            elif d1.get('highway') == d2.get('highway') == 'service':
+                self.g[u1][v1]['merge_type'] = 'service'
+            else:
+                self.g[u1][v1]['merge_type'] = 'parallel'
+
     pass
 
 ##
