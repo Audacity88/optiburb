@@ -66,7 +66,7 @@ class RouteService:
             
             # Only get polygon and add it if we don't have an existing instance
             if not existing_burbing:
-                polygon = burbing.get_osm_polygon(location, select=1, buffer_dist=20)
+                polygon = burbing.data_loader.load_osm_data(location, select=1, buffer_dist=20)
                 if not polygon:
                     progress_queue.put(json.dumps({
                         'type': 'progress',
@@ -124,7 +124,7 @@ class RouteService:
             burbing.load(options)
             
             # Ensure the graph is directed
-            if not hasattr(burbing, 'g') or burbing.g is None:
+            if not hasattr(burbing.graph_manager, 'g') or burbing.graph_manager.g is None:
                 logger.error("Graph was not created during load")
                 return None, "Failed to create graph"
             
@@ -134,9 +134,6 @@ class RouteService:
                 'progress': 40,
                 'message': 'Processing directed road network...'
             }))
-            
-            if options.prune:
-                burbing.prune()
             
             progress_queue.put(json.dumps({
                 'type': 'progress',
@@ -154,7 +151,7 @@ class RouteService:
             
             if options.feature_deadend:
                 try:
-                    burbing.optimise_dead_ends()
+                    burbing.optimize_dead_ends()
                 except Exception as e:
                     logger.error(f"Error optimizing dead ends: {str(e)}")
                     # Continue even if dead end optimization fails
@@ -168,7 +165,6 @@ class RouteService:
             
             # Find Eulerian circuit in directed graph
             try:
-                burbing.determine_combinations()
                 burbing.determine_circuit()
             except ValueError as e:
                 logger.error(f"Error finding Eulerian circuit: {str(e)}")
@@ -185,70 +181,33 @@ class RouteService:
                 'message': 'Generating GPX file from directed route...'
             }))
             
-            formatted_location = location.lower().replace(' ', '_').replace(',', '')
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            gpx_filename = f'burb_track_{formatted_location}_{timestamp}.gpx'
-            
             # Create GPX track from directed graph
             try:
-                burbing.create_gpx_track(burbing.g_augmented, burbing.euler_circuit, options.simplify_gpx)
+                gpx_filename = burbing.create_gpx_track(options.simplify_gpx)
+                
+                # Verify the file exists
+                gpx_filepath = os.path.join(settings.UPLOAD_FOLDER, gpx_filename)
+                if not os.path.exists(gpx_filepath):
+                    raise FileNotFoundError(f"Generated GPX file not found at {gpx_filepath}")
+                
+                progress_queue.put(json.dumps({
+                    'type': 'progress',
+                    'step': 'Complete',
+                    'progress': 100,
+                    'message': 'Route generated successfully!'
+                }))
+                
+                return gpx_filename, None
+                
             except Exception as e:
                 logger.error(f"Error creating GPX track: {str(e)}")
                 return None, f"Error creating GPX file: {str(e)}"
-            
-            # Wait for the file to be created (up to 5 seconds)
-            max_attempts = 10
-            attempt = 0
-            while attempt < max_attempts:
-                gpx_files = [f for f in os.listdir(settings.ROOT_DIR) 
-                            if f.startswith(f'burb_track_{formatted_location}_') and f.endswith('.gpx')]
-                if gpx_files:
-                    break
-                time.sleep(0.5)
-                attempt += 1
-            
-            if not gpx_files:
-                raise FileNotFoundError("Generated GPX file not found")
-            
-            # Sort by creation time and get the most recent
-            src_path = os.path.join(settings.ROOT_DIR, 
-                                  sorted(gpx_files, 
-                                        key=lambda x: os.path.getctime(
-                                            os.path.join(settings.ROOT_DIR, x)
-                                        ))[-1])
-            
-            dst_path = os.path.join(settings.UPLOAD_FOLDER, os.path.basename(src_path))
-            
-            # Ensure the UPLOAD_FOLDER exists
-            os.makedirs(settings.UPLOAD_FOLDER, exist_ok=True)
-            
-            # Try to move the file with retries
-            max_move_attempts = 3
-            move_attempt = 0
-            while move_attempt < max_move_attempts:
-                try:
-                    shutil.move(src_path, dst_path)
-                    break
-                except Exception as e:
-                    move_attempt += 1
-                    if move_attempt == max_move_attempts:
-                        raise
-                    time.sleep(0.5)
-            
-            progress_queue.put(json.dumps({
-                'type': 'progress',
-                'step': 'Complete',
-                'progress': 100,
-                'message': 'Route generated successfully!'
-            }))
-            
-            return os.path.basename(src_path), None
             
         except Exception as e:
             logger.error(f"Error in route generation: {str(e)}")
             progress_queue.put(json.dumps({
                 'type': 'progress',
-                'message': f'Error in route generation: {str(e)}'
+                'message': f'Error: {str(e)}'
             }))
             return None, str(e)
 
@@ -259,135 +218,80 @@ class RouteService:
             file_path = os.path.join(settings.UPLOAD_FOLDER, filename)
             if not os.path.exists(file_path):
                 logger.error(f"File not found: {file_path}")
-                raise FileNotFoundError(f"File not found: {filename}")
+                return None, "File not found"
             
-            logger.info(f"Reading GPX file: {file_path}")
             # Parse GPX file
             with open(file_path, 'r') as gpx_file:
                 gpx = gpxpy.parse(gpx_file)
             
-            # Convert to GeoJSON with direction indicators
+            # Extract route points and direction markers
             features = []
-            direction_count = 0
+            bounds = {
+                "minLat": float('inf'),
+                "maxLat": float('-inf'),
+                "minLng": float('inf'),
+                "maxLng": float('-inf')
+            }
             
             for track in gpx.tracks:
                 for segment in track.segments:
-                    coordinates = []
-                    direction_points = []
+                    route_coords = []
+                    prev_point = None
                     
-                    # Store all coordinates first
-                    for i, point in enumerate(segment.points):
-                        coordinates.append([point.longitude, point.latitude])
-                    
-                    # Add direction markers at edge midpoints
-                    if len(coordinates) >= 2:
-                        direction_points = []
+                    for point in segment.points:
+                        # Update bounds
+                        bounds["minLat"] = min(bounds["minLat"], point.latitude)
+                        bounds["maxLat"] = max(bounds["maxLat"], point.latitude)
+                        bounds["minLng"] = min(bounds["minLng"], point.longitude)
+                        bounds["maxLng"] = max(bounds["maxLng"], point.longitude)
                         
-                        # Process each edge (pair of consecutive points)
-                        for i in range(len(coordinates) - 1):
-                            # Get current and next point
-                            p1 = coordinates[i]
-                            p2 = coordinates[i + 1]
-                            
-                            # Calculate point 30% along the edge
-                            point = [
-                                p1[0] + (p2[0] - p1[0]) * 0.7,  # longitude
-                                p1[1] + (p2[1] - p1[1]) * 0.7   # latitude
-                            ]
-                            
-                            # Calculate bearing between the two points
-                            bearing = calculate_bearing(
-                                p1[1], p1[0],  # lat, lon of start
-                                p2[1], p2[0]   # lat, lon of end
+                        # Add point to route coordinates
+                        route_coords.append([point.longitude, point.latitude])
+                        
+                        # Check if this is a direction marker
+                        if hasattr(point, 'type') and point.type == 'direction' and prev_point:
+                            # Calculate bearing if not provided
+                            bearing = float(point.comment) if hasattr(point, 'comment') else calculate_bearing(
+                                prev_point.latitude, prev_point.longitude,
+                                point.latitude, point.longitude
                             )
                             
-                            direction_points.append({
-                                'index': i,
-                                'coordinates': point,
-                                'bearing': bearing
+                            # Add direction marker feature
+                            features.append({
+                                "type": "Feature",
+                                "geometry": {
+                                    "type": "Point",
+                                    "coordinates": [point.longitude, point.latitude]
+                                },
+                                "properties": {
+                                    "type": "direction",
+                                    "bearing": bearing
+                                }
                             })
-                            direction_count += 1
-                            # logger.info(f"Added direction marker at edge {i} midpoint with bearing {bearing}°")
+                        
+                        prev_point = point
                     
-                    if not coordinates:
-                        logger.warning(f"No coordinates found in track segment")
-                        continue
-                    
-                    logger.info(f"Processing track segment with {len(coordinates)} points and {len(direction_points)} direction markers")
-                    
-                    # Create main route feature
-                    route_feature = {
-                        "type": "Feature",
-                        "geometry": {
-                            "type": "LineString",
-                            "coordinates": coordinates
-                        },
-                        "properties": {
-                            "name": track.name or "Route",
-                            "type": "route"
-                        }
-                    }
-                    features.append(route_feature)
-                    
-                    # Create features for direction markers
-                    for direction in direction_points:
-                        marker_feature = {
+                    # Add route line feature
+                    if route_coords:
+                        features.append({
                             "type": "Feature",
                             "geometry": {
-                                "type": "Point",
-                                "coordinates": direction['coordinates']
+                                "type": "LineString",
+                                "coordinates": route_coords
                             },
                             "properties": {
-                                "type": "direction",
-                                "bearing": direction['bearing']
+                                "type": "route"
                             }
-                        }
-                        features.append(marker_feature)
-                        # logger.debug(f"Added direction marker feature with bearing {direction['bearing']}°")
-            
-            logger.info(f"Total direction markers found: {direction_count}")
-            
-            if not features:
-                logger.error("No valid features found in GPX file")
-                return None, "No valid route data found"
-            
-            geojson = {
-                "type": "FeatureCollection",
-                "features": features
-            }
-            
-            # Calculate bounds
-            route_features = [f for f in features if f["properties"]["type"] == "route"]
-            direction_features = [f for f in features if f["properties"]["type"] == "direction"]
-            
-            logger.info(f"GeoJSON contains {len(route_features)} route features and {len(direction_features)} direction features")
-            
-            # Calculate bounds from route features
-            if route_features:
-                all_coords = []
-                for feature in route_features:
-                    coords = feature["geometry"]["coordinates"]
-                    all_coords.extend(coords)
-                
-                min_lng = min(coord[0] for coord in all_coords)
-                max_lng = max(coord[0] for coord in all_coords)
-                min_lat = min(coord[1] for coord in all_coords)
-                max_lat = max(coord[1] for coord in all_coords)
-                
-                bounds = {
-                    "minLat": min_lat,
-                    "maxLat": max_lat,
-                    "minLng": min_lng,
-                    "maxLng": max_lng
-                }
-            else:
-                bounds = None
+                        })
             
             return {
-                "geojson": geojson,
+                "geojson": {
+                    "type": "FeatureCollection",
+                    "features": features
+                },
                 "bounds": bounds
             }, None
             
         except Exception as e:
-            logger.error(f"Error processing GPX file: {str(e)}")
+            logger.error(f"Error processing route data: {str(e)}")
             return None, str(e)

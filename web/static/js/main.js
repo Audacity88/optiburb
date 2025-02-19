@@ -72,21 +72,18 @@ document.addEventListener('DOMContentLoaded', function() {
         map.createPane('baseRoutePane');  // New pane for the original route
         map.createPane('routePane');
         map.createPane('segmentsPane');
-        map.createPane('markersPane');  // New pane for start/end markers
         
         // Set z-index and pointer events for panes
         map.getPane('activitiesPane').style.zIndex = 300;
-        map.getPane('baseRoutePane').style.zIndex = 350;
+        map.getPane('baseRoutePane').style.zIndex = 350;  // Between activities and route
         map.getPane('routePane').style.zIndex = 400;
         map.getPane('segmentsPane').style.zIndex = 500;
-        map.getPane('markersPane').style.zIndex = 600;  // Markers on top
         
         // Ensure pointer events are enabled
         map.getPane('activitiesPane').style.pointerEvents = 'auto';
         map.getPane('baseRoutePane').style.pointerEvents = 'auto';
         map.getPane('routePane').style.pointerEvents = 'auto';
         map.getPane('segmentsPane').style.pointerEvents = 'auto';
-        map.getPane('markersPane').style.pointerEvents = 'auto';
 
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
@@ -94,7 +91,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
         // Initialize layers with their respective panes but don't add to map yet
         activitiesLayer = L.featureGroup([], { pane: 'activitiesPane' });
-        baseRouteLayer = L.featureGroup([], { pane: 'baseRoutePane' });
+        baseRouteLayer = L.featureGroup([], { pane: 'baseRoutePane' });  // New layer for original route
         routeLayer = L.featureGroup([], { pane: 'routePane' });
         segmentsLayer = L.featureGroup([], { pane: 'segmentsPane' });
     }
@@ -168,60 +165,6 @@ document.addEventListener('DOMContentLoaded', function() {
                         pane: 'baseRoutePane'
                     }
                 }).addTo(baseRouteLayer);
-                
-                // Add start and end markers if we have route coordinates
-                if (routeFeatures.length > 0 && routeFeatures[0].geometry.coordinates.length > 0) {
-                    const coordinates = routeFeatures[0].geometry.coordinates;
-                    const startCoord = coordinates[0];
-                    const endCoord = coordinates[coordinates.length - 1];
-                    
-                    console.log('Start coordinates:', startCoord);
-                    console.log('End coordinates:', endCoord);
-                    
-                    // Check if start and end are the same or very close
-                    const isSamePoint = startCoord[0] === endCoord[0] && startCoord[1] === endCoord[1];
-                    console.log('Start and end are same point:', isSamePoint);
-                    
-                    // Create custom start marker icon
-                    const startIcon = L.divIcon({
-                        className: 'custom-marker-icon',
-                        html: `<div style="background-color: #22c55e; width: 32px; height: 32px; border-radius: 50%; border: 3px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.3); display: flex; align-items: center; justify-content: center; z-index: 1001;">
-                                <div style="color: white; font-weight: bold; font-size: 16px;">S</div>
-                               </div>`,
-                        iconSize: [32, 32],
-                        iconAnchor: [16, 16]
-                    });
-                    
-                    // Create custom end marker icon
-                    const endIcon = L.divIcon({
-                        className: 'custom-marker-icon',
-                        html: `<div style="background-color: #ef4444; width: 32px; height: 32px; border-radius: 50%; border: 3px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.3); display: flex; align-items: center; justify-content: center; z-index: 1000;">
-                                <div style="color: white; font-weight: bold; font-size: 16px;">E</div>
-                               </div>`,
-                        iconSize: [32, 32],
-                        iconAnchor: [16, 16]
-                    });
-                    
-                    // Create markers layer
-                    const markersLayer = L.featureGroup([], { pane: 'markersPane' });
-                    
-                    // Add start marker (with slight offset if same point)
-                    L.marker([startCoord[1] + (isSamePoint ? 0.0001 : 0), startCoord[0]], {
-                        icon: startIcon,
-                        pane: 'markersPane',
-                        zIndexOffset: 1001  // Ensure start is above end
-                    }).bindPopup('<div class="font-medium">Start Point</div>').addTo(markersLayer);
-                    
-                    // Add end marker
-                    L.marker([endCoord[1], endCoord[0]], {
-                        icon: endIcon,
-                        pane: 'markersPane',
-                        zIndexOffset: 1000
-                    }).bindPopup('<div class="font-medium">End Point</div>').addTo(markersLayer);
-                    
-                    // Add markers layer to map
-                    markersLayer.addTo(map);
-                }
                 
                 // Add base route layer to map
                 baseRouteLayer.addTo(map);

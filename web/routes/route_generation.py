@@ -45,6 +45,7 @@ def progress(session_id):
 
 @routes.route('/generate', methods=['POST'])
 def generate_route():
+    progress_handler = None
     try:
         data = request.get_json()
         location = data.get('location')
@@ -55,8 +56,15 @@ def generate_route():
         progress_queue = queue.Queue()
         progress_queues[session_id] = progress_queue
         
-        # Create progress handler
+        # Create progress handler and store it for cleanup
         progress_handler = ProgressHandler(progress_queue)
+        
+        # Remove any existing handlers of the same type to prevent duplicates
+        for handler in logger.handlers[:]:
+            if isinstance(handler, ProgressHandler):
+                logger.removeHandler(handler)
+        
+        # Add the new handler
         logger.addHandler(progress_handler)
 
         # Check for Strava authentication and get completed area if needed
@@ -68,7 +76,7 @@ def generate_route():
             
             # Initialize Burbing
             burbing = Burbing()
-            polygon = burbing.get_osm_polygon(location, select=1, buffer_dist=20)
+            polygon = burbing.data_loader.load_osm_data(location, select=1, buffer_dist=20)
             burbing.add_polygon(polygon, location)
             
             # Get bounds from the polygon
@@ -135,9 +143,6 @@ def generate_route():
             'message': 'Route generated successfully!'
         }))
         
-        # Remove progress handler
-        logger.removeHandler(progress_handler)
-        
         return jsonify({
             'success': True,
             'message': 'Route generated successfully',
@@ -152,6 +157,14 @@ def generate_route():
                 'message': str(e)
             }))
         return jsonify({'error': str(e)}), 500
+    
+    finally:
+        # Clean up the progress handler in all cases
+        if progress_handler and progress_handler in logger.handlers:
+            logger.removeHandler(progress_handler)
+        # Clean up the progress queue
+        if 'session_id' in locals() and session_id in progress_queues:
+            progress_queues.pop(session_id, None)
 
 @routes.route('/download/<filename>')
 def download_file(filename):

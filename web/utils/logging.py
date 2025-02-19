@@ -5,21 +5,24 @@ from logging import Handler
 
 def setup_logging():
     """Configure logging for the application."""
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        force=True
-    )
+    # Get the logger
     logger = logging.getLogger(__name__)
+    
+    # Clear any existing handlers
+    logger.handlers = []
+    
+    # Set the level
     logger.setLevel(logging.DEBUG)
 
-    # Add a stream handler if none exists
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setLevel(logging.DEBUG)
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
+    # Add a single stream handler
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+    # Prevent propagation to root logger to avoid duplicates
+    logger.propagate = False
 
     return logger
 
@@ -28,6 +31,7 @@ class ProgressHandler(Handler):
     def __init__(self, queue):
         super().__init__()
         self.queue = queue
+        self.setFormatter(logging.Formatter('%(message)s'))
 
     def emit(self, record):
         try:

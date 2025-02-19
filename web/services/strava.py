@@ -174,5 +174,14 @@ class StravaService:
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error exchanging code for token: {str(e)}")
+            # Get more detailed error information
+            error_detail = ""
+            if hasattr(e.response, 'text'):
+                try:
+                    error_json = e.response.json()
+                    error_detail = f" Response: {error_json}"
+                except:
+                    error_detail = f" Response: {e.response.text}"
+            logger.error(f"Error exchanging code for token: {str(e)}{error_detail}")
+            logger.error(f"Request data: {data}")
             return None
