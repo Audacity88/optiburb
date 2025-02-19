@@ -57,8 +57,9 @@ document.addEventListener('DOMContentLoaded', function() {
     let map = null;
     let routeLayer = null;
     let segmentsLayer = null;
-    let activitiesLayer = null;  // Add activities layer to track globally
-    let baseRouteLayer = null;  // New layer for the original route
+    let activitiesLayer = null;
+    let baseRouteLayer = null;
+    let directionsLayer = null;  // New layer for direction arrows
 
     function initMap(center) {
         if (map) {
@@ -69,31 +70,35 @@ document.addEventListener('DOMContentLoaded', function() {
         
         // Create custom panes with explicit z-index values
         map.createPane('activitiesPane');
-        map.createPane('baseRoutePane');  // New pane for the original route
+        map.createPane('baseRoutePane');
         map.createPane('routePane');
         map.createPane('segmentsPane');
+        map.createPane('directionsPane');  // New pane for directions
         
         // Set z-index and pointer events for panes
         map.getPane('activitiesPane').style.zIndex = 300;
-        map.getPane('baseRoutePane').style.zIndex = 350;  // Between activities and route
+        map.getPane('baseRoutePane').style.zIndex = 350;
         map.getPane('routePane').style.zIndex = 400;
         map.getPane('segmentsPane').style.zIndex = 500;
+        map.getPane('directionsPane').style.zIndex = 600;  // Highest z-index for arrows
         
         // Ensure pointer events are enabled
         map.getPane('activitiesPane').style.pointerEvents = 'auto';
         map.getPane('baseRoutePane').style.pointerEvents = 'auto';
         map.getPane('routePane').style.pointerEvents = 'auto';
         map.getPane('segmentsPane').style.pointerEvents = 'auto';
+        map.getPane('directionsPane').style.pointerEvents = 'none';  // No pointer events needed for arrows
 
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         }).addTo(map);
 
-        // Initialize layers with their respective panes but don't add to map yet
+        // Initialize layers with their respective panes
         activitiesLayer = L.featureGroup([], { pane: 'activitiesPane' });
-        baseRouteLayer = L.featureGroup([], { pane: 'baseRoutePane' });  // New layer for original route
+        baseRouteLayer = L.featureGroup([], { pane: 'baseRoutePane' });
         routeLayer = L.featureGroup([], { pane: 'routePane' });
         segmentsLayer = L.featureGroup([], { pane: 'segmentsPane' });
+        directionsLayer = L.featureGroup([], { pane: 'directionsPane' });  // Initialize directions layer
     }
 
     function displayRoute(filename) {
@@ -129,24 +134,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 // Add the route to the map
                 console.log('Adding route to map');
                 
-                // Create a custom arrow icon using the SVG file
-                const arrowIcon = L.divIcon({
-                    html: `<div class="direction-arrow" style="width: 24px; height: 24px;">
-                        <svg width="24" height="24" viewBox="0 0 24 24" version="1.1" xmlns="http://www.w3.org/2000/svg">
-                            <path d="M12 2 L22 22 L12 18 L2 22 Z" 
-                                  fill="#3388ff" 
-                                  stroke="#ffffff" 
-                                  stroke-width="2"
-                                  stroke-linejoin="round"/>
-                        </svg>
-                    </div>`,
-                    className: 'direction-marker',
-                    iconSize: [24, 24],
-                    iconAnchor: [12, 12]
-                });
-                
-                console.log('Created arrow icon:', arrowIcon);
-                
                 // Add route lines first
                 const routeFeatures = data.geojson.features.filter(f => f.properties.type === 'route');
                 const directionFeatures = data.geojson.features.filter(f => f.properties.type === 'direction');
@@ -156,7 +143,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 // Add original route to base route layer
                 baseRouteLayer.clearLayers();
                 
-                // First add the route lines
+                // First add the route lines (without decorators)
                 const baseRoute = L.geoJSON(routeFeatures, {
                     style: {
                         color: '#2563eb',  // dark blue
@@ -166,24 +153,24 @@ document.addEventListener('DOMContentLoaded', function() {
                     }
                 }).addTo(baseRouteLayer);
                 
-                // Add base route layer to map
+                // Add layers to map in correct order
                 baseRouteLayer.addTo(map);
+                directionsLayer.addTo(map);
                 
-                // Then re-add direction markers
-                routeLayer.clearLayers(); // Clear existing markers
+                // Clear route layer since we're not using it for directions anymore
+                routeLayer.clearLayers();
                 
+                // Add direction ticks to the directions layer
                 directionFeatures.forEach((feature, index) => {
                     const bearing = feature.properties.bearing;
                     const coords = feature.geometry.coordinates;
                     
-                    // console.log(`Adding direction tick ${index + 1}:`, {coords, bearing});
-                    
                     // Convert from [lng, lat] to [lat, lng] for Leaflet
                     const center = [coords[1], coords[0]];
                     
-                    // Calculate base length and angles
-                    const baseLength = 0.0001; // Keep the same size
-                    const backAngle = 40; // Slightly tighter angle
+                    // Calculate base length and angles (2x larger)
+                    const baseLength = 0.0002; // Doubled from 0.0001
+                    const backAngle = 40; // Keep the same angle
                     
                     // Convert bearing to radians and adjust for map coordinates (-90 degree rotation)
                     const bearingRad = (bearing * Math.PI) / 180;
@@ -208,20 +195,17 @@ document.addEventListener('DOMContentLoaded', function() {
                         center[1] + (baseLength * 0.7 * Math.sin(rightRad))
                     ];
                     
-                    // Create the arrow shape from front to back points
+                    // Create the arrow shape from front to back points (increased weight to match larger size)
                     const tick = L.polyline([frontPoint, center, leftPoint, center, rightPoint], {
                         color: '#3388ff',
-                        weight: 2.5,
+                        weight: 3.5,  // Increased from 2.5 to match larger size
                         opacity: 1.0,
-                        pane: 'routePane'
-                    }).addTo(routeLayer);
+                        pane: 'directionsPane'
+                    }).addTo(directionsLayer);
                 });
-                
-                // Ensure routeLayer is added to map
-                routeLayer.addTo(map);
-                
+
                 // Store the original route for later use
-                const originalRoute = routeLayer.getLayers()[0];
+                const originalRoute = baseRouteLayer.getLayers()[0];
                 
                 // Log layer information for debugging
                 console.log('Route layer has features:', routeLayer.getLayers().length);
@@ -301,7 +285,7 @@ document.addEventListener('DOMContentLoaded', function() {
                             console.info('Updating route with completion data');
                             
                             // Store direction ticks before clearing
-                            const directionTicks = routeLayer.getLayers();
+                            const directionTicks = directionsLayer.getLayers();
                             
                             // Clear only the segments layer
                             segmentsLayer.clearLayers();
@@ -343,22 +327,22 @@ document.addEventListener('DOMContentLoaded', function() {
                                 line.addTo(segmentsLayer);
                             });
 
-                            // Re-add direction ticks
+                            // Re-add direction ticks to the directions layer
                             directionTicks.forEach(tick => {
-                                tick.addTo(routeLayer);
+                                tick.addTo(directionsLayer);
                             });
 
                             // Ensure proper layer order
                             activitiesLayer.remove();
                             baseRouteLayer.remove();
-                            routeLayer.remove();
+                            directionsLayer.remove();
                             segmentsLayer.remove();
                             
                             // Add layers in correct order (bottom to top)
                             activitiesLayer.addTo(map);
                             baseRouteLayer.addTo(map);
                             segmentsLayer.addTo(map);
-                            routeLayer.addTo(map);  // Add route layer last to keep ticks on top
+                            directionsLayer.addTo(map);  // Add directions layer last to keep arrows on top
                             
                             // Force map update and redraw
                             map.invalidateSize();
@@ -386,9 +370,10 @@ document.addEventListener('DOMContentLoaded', function() {
                         console.log('Activities layer has features:', activitiesLayer.getLayers().length > 0);
                         console.log('Route layer has features:', routeLayer.getLayers().length > 0);
 
-                        // Add layer control
+                        // Add layer control with the new directions layer
                         const overlayMaps = {
-                            "Route": routeLayer,
+                            "Route": baseRouteLayer,
+                            "Directions": directionsLayer,
                             "Activities": activitiesLayer,
                             "Completed": segmentsLayer
                         };
@@ -402,7 +387,8 @@ document.addEventListener('DOMContentLoaded', function() {
                         }).addTo(map);
 
                         // Ensure all layers are visible by default
-                        map.addLayer(routeLayer);
+                        map.addLayer(baseRouteLayer);
+                        map.addLayer(directionsLayer);
                         map.addLayer(activitiesLayer);
                         map.addLayer(segmentsLayer);
 

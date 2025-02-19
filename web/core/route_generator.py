@@ -204,7 +204,41 @@ class RouteGenerator:
         
         if simplify:
             logger.info('simplifying GPX')
+            # Store direction markers before simplification
+            direction_markers = []
+            for point in segment.points:
+                if hasattr(point, 'type') and point.type == 'direction':
+                    direction_markers.append(point)
+            
+            # Remove direction markers temporarily
+            segment.points = [p for p in segment.points if not (hasattr(p, 'type') and p.type == 'direction')]
+            
+            # Simplify the track
             gpx.simplify()
+            
+            # Re-add direction markers at appropriate intervals
+            simplified_points = segment.points[:]
+            segment.points = []
+            
+            arrow_interval = max(3, len(simplified_points) // (total_direction_markers + 1))
+            for i, point in enumerate(simplified_points):
+                segment.points.append(point)
+                if i > 0 and i < len(simplified_points) - 1 and i % arrow_interval == 0:
+                    # Create new direction marker
+                    marker = gpxpy.gpx.GPXTrackPoint(
+                        latitude=point.latitude,
+                        longitude=point.longitude
+                    )
+                    marker.type = 'direction'
+                    marker.symbol = '➜'
+                    # Calculate bearing to next point
+                    next_point = simplified_points[i + 1]
+                    bearing = self.geometry.calculate_bearing(
+                        point.latitude, point.longitude,
+                        next_point.latitude, next_point.longitude
+                    )
+                    marker.comment = str(round(bearing, 1))
+                    segment.points.append(marker)
 
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f'optiburb_route_{timestamp}.gpx'
