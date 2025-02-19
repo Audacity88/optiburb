@@ -57,10 +57,10 @@ class RouteGenerator:
         
         # Track completed and uncompleted edges separately
         completed_pairs = {}  # {frozenset(u,v): (edge1, edge2)} for completed bidirectional edges
-        uncompleted_edges = set()  # Edges that need to be preserved
+        uncompleted_edges = set()  # Single direction edges that need to be preserved
         nodes_with_uncompleted = set()  # Nodes that have uncompleted edges
         
-        # First identify all uncompleted edges and their nodes
+        # First identify all edges and their completion status
         for u, v, data in graph.edges(data=True):
             if 'geometry' in data:
                 edges_with_geometry += 1
@@ -91,7 +91,7 @@ class RouteGenerator:
                 edge_area = edge_buffer.area if edge_buffer.area > 0 else 1e-10
                 overlap_ratio = intersection_area / edge_area
                 
-                # If more than 70% completed, check for bidirectional completion
+                # If more than 70% completed
                 if overlap_ratio > 0.7:
                     high_overlap_edges += 1
                     edge_pair = frozenset([u, v])
@@ -108,24 +108,25 @@ class RouteGenerator:
                             # Both directions are completed
                             completed_pairs[edge_pair] = ((u, v), (v, u))
                         else:
-                            # Only one direction completed, must preserve both
+                            # Only one direction completed, treat as uncompleted
                             uncompleted_edges.add((u, v))
-                            uncompleted_edges.add((v, u))
                             nodes_with_uncompleted.add(u)
                             nodes_with_uncompleted.add(v)
                     else:
-                        # Single direction edge, mark as uncompleted to preserve balance
+                        # Single direction completed edge
+                        completed_pairs[edge_pair] = ((u, v), None)
+                else:
+                    # Edge is not completed, keep only one direction unless both are needed
+                    if (v, u) not in uncompleted_edges:  # Only add if reverse not already added
                         uncompleted_edges.add((u, v))
                         nodes_with_uncompleted.add(u)
                         nodes_with_uncompleted.add(v)
-                else:
+            else:
+                # Edge is not completed, keep only one direction unless both are needed
+                if (v, u) not in uncompleted_edges:  # Only add if reverse not already added
                     uncompleted_edges.add((u, v))
                     nodes_with_uncompleted.add(u)
                     nodes_with_uncompleted.add(v)
-            else:
-                uncompleted_edges.add((u, v))
-                nodes_with_uncompleted.add(u)
-                nodes_with_uncompleted.add(v)
 
         logger.info(f"Edge analysis:")
         logger.info(f"  - Total edges: {total_edges}")
@@ -184,15 +185,15 @@ class RouteGenerator:
                         u, v = best_path[k], best_path[k + 1]
                         edge_pair = frozenset([u, v])
                         
-                        # If this is a completed pair, add both directions
+                        # If this is a completed pair, add both directions to maintain balance
                         if edge_pair in completed_pairs:
-                            paths_to_add.add(completed_pairs[edge_pair][0])
-                            paths_to_add.add(completed_pairs[edge_pair][1])
+                            if completed_pairs[edge_pair][1]:  # If it has a reverse edge
+                                paths_to_add.add(completed_pairs[edge_pair][0])
+                                paths_to_add.add(completed_pairs[edge_pair][1])
+                            else:
+                                paths_to_add.add(completed_pairs[edge_pair][0])
                         else:
                             paths_to_add.add((u, v))
-                            # If reverse edge exists and isn't completed, add it too
-                            if graph.has_edge(v, u) and frozenset([v, u]) not in completed_pairs:
-                                paths_to_add.add((v, u))
         
         # Add all required paths
         for u, v in paths_to_add:
@@ -209,8 +210,145 @@ class RouteGenerator:
                 unbalanced_nodes.append((node, in_degree, out_degree))
         
         if unbalanced_nodes:
-            logger.warning(f"Found {len(unbalanced_nodes)} unbalanced nodes after filtering, reverting changes")
-            return graph
+            logger.warning(f"Found {len(unbalanced_nodes)} unbalanced nodes after filtering")
+            
+            # Create lists of nodes needing incoming and outgoing edges
+            needs_in = []  # (node, num_edges_needed)
+            needs_out = []  # (node, num_edges_needed)
+            
+            for node, in_deg, out_deg in unbalanced_nodes:
+                if in_deg < out_deg:
+                    needs_in.append((node, out_deg - in_deg))
+                else:
+                    needs_out.append((node, in_deg - out_deg))
+            
+            logger.info(f"Nodes needing incoming edges: {len(needs_in)}")
+            logger.info(f"Nodes needing outgoing edges: {len(needs_out)}")
+            
+            # Create a flow network to solve the balancing problem
+            flow_graph = nx.DiGraph()
+            
+            # Add source and sink nodes
+            source = 'source'
+            sink = 'sink'
+            
+            # Add edges from source to nodes needing outgoing edges
+            for node, deficit in needs_out:
+                flow_graph.add_edge(source, node, capacity=deficit)
+            
+            # Add edges from nodes needing incoming edges to sink
+            for node, deficit in needs_in:
+                flow_graph.add_edge(node, sink, capacity=deficit)
+            
+            # Add edges between all pairs of unbalanced nodes if a path exists in original graph
+            for source_node, _ in needs_out:
+                for target_node, _ in needs_in:
+                    try:
+                        # Find shortest path in original graph
+                        path = nx.shortest_path(graph, source_node, target_node, weight='length')
+                        path_length = sum(graph[path[i]][path[i+1]].get('length', 1) 
+                                        for i in range(len(path)-1))
+                        
+                        # Add edge to flow graph with high capacity
+                        flow_graph.add_edge(source_node, target_node, 
+                                          capacity=10,  # Allow multiple flows through this path
+                                          path=path,
+                                          length=path_length)
+                    except nx.NetworkXNoPath:
+                        continue
+            
+            try:
+                # Find the minimum cost flow
+                flow_dict = nx.max_flow_min_cost(flow_graph, 'source', 'sink')
+                
+                # Add balancing edges based on the flow
+                edges_added = 0
+                for u in flow_dict:
+                    if u not in ('source', 'sink'):
+                        for v, flow in flow_dict[u].items():
+                            if v not in ('source', 'sink') and flow > 0:
+                                # Get the path from the flow graph
+                                edge_data = flow_graph[u][v]
+                                if 'path' in edge_data:
+                                    path = edge_data['path']
+                                    # Add all edges along the path
+                                    for i in range(len(path)-1):
+                                        source, target = path[i], path[i+1]
+                                        if not filtered_graph.has_edge(source, target):
+                                            # Check if this is a completed edge pair
+                                            edge_pair = frozenset([source, target])
+                                            if edge_pair in completed_pairs:
+                                                if completed_pairs[edge_pair][1]:  # Has reverse edge
+                                                    filtered_graph.add_edge(source, target, 
+                                                                         **graph.get_edge_data(source, target))
+                                                    filtered_graph.add_edge(target, source, 
+                                                                         **graph.get_edge_data(target, source))
+                                                    edges_added += 2
+                                                else:
+                                                    filtered_graph.add_edge(source, target, 
+                                                                         **graph.get_edge_data(source, target))
+                                                    edges_added += 1
+                                            else:
+                                                # Add the edge from the original graph
+                                                filtered_graph.add_edge(source, target, 
+                                                                     **graph.get_edge_data(source, target))
+                                                edges_added += 1
+                
+                logger.info(f"Added {edges_added} edges to balance the graph")
+                
+                # Verify balance again
+                unbalanced_after = []
+                for node in filtered_graph.nodes():
+                    in_degree = filtered_graph.in_degree(node)
+                    out_degree = filtered_graph.out_degree(node)
+                    if in_degree != out_degree:
+                        unbalanced_after.append((node, in_degree, out_degree))
+                
+                if unbalanced_after:
+                    logger.error(f"Graph is still unbalanced after adding edges. Found {len(unbalanced_after)} unbalanced nodes")
+                    # Try one final balancing pass using direct edges
+                    needs_in = [(n, i, o) for n, i, o in unbalanced_after if i < o]
+                    needs_out = [(n, i, o) for n, i, o in unbalanced_after if i > o]
+                    
+                    while needs_in and needs_out:
+                        target, t_in, t_out = needs_in[0]
+                        source, s_in, s_out = needs_out[0]
+                        
+                        # Add direct edge
+                        if not filtered_graph.has_edge(source, target):
+                            # Try to use existing edge data
+                            if graph.has_edge(source, target):
+                                filtered_graph.add_edge(source, target, **graph.get_edge_data(source, target))
+                            else:
+                                # Create new edge with straight line geometry
+                                edge_data = {}
+                                source_coords = (graph.nodes[source]['x'], graph.nodes[source]['y'])
+                                target_coords = (graph.nodes[target]['x'], graph.nodes[target]['y'])
+                                edge_data['geometry'] = shapely.geometry.LineString([source_coords, target_coords])
+                                filtered_graph.add_edge(source, target, **edge_data)
+                            edges_added += 1
+                        
+                        # Update counts and remove balanced nodes
+                        if t_out - t_in == 1:
+                            needs_in.pop(0)
+                        if s_in - s_out == 1:
+                            needs_out.pop(0)
+                    
+                    # Final balance check
+                    unbalanced_final = []
+                    for node in filtered_graph.nodes():
+                        in_degree = filtered_graph.in_degree(node)
+                        out_degree = filtered_graph.out_degree(node)
+                        if in_degree != out_degree:
+                            unbalanced_final.append((node, in_degree, out_degree))
+                    
+                    if unbalanced_final:
+                        logger.error(f"Failed to balance graph. Found {len(unbalanced_final)} unbalanced nodes after all attempts")
+                        return graph
+            
+            except nx.NetworkXUnfeasible:
+                logger.error("No feasible flow found to balance the graph")
+                return graph
         
         # Verify connectivity
         if not nx.is_weakly_connected(filtered_graph):
@@ -332,7 +470,7 @@ class RouteGenerator:
 
         for n, edge in enumerate(edges):
             u, v = edge
-            edge_data = graph.get_edge_data(u, v, 0)
+            edge_data = graph.get_edge_data(u, v)
 
             logger.debug('EDGE [%d] - edge=%s, data=%s', n, edge, edge_data)
 
