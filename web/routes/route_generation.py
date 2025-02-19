@@ -67,21 +67,24 @@ def generate_route():
         # Add the new handler
         logger.addHandler(progress_handler)
 
+        # Initialize Burbing with buffer size
+        buffer_meters = data.get('buffer', 500)  # Default to 500m if not provided
+        buffer_degrees = buffer_meters / 111000  # Convert meters to degrees (approximately)
+        logger.info(f"Using buffer size: {buffer_meters}m ({buffer_degrees:.6f} degrees)")
+        
+        burbing = Burbing()
+        polygon = burbing.data_loader.load_osm_data(location, select=1, buffer_dist=buffer_degrees)
+        burbing.add_polygon(polygon, location)
+        
+        # Get bounds from the polygon
+        minx, miny, maxx, maxy = polygon.bounds
+        logger.info(f"Area bounds: minLat={miny}, maxLat={maxy}, minLng={minx}, maxLng={maxx}")
+
         # Check for Strava authentication and get completed area if needed
         completed_area = None
-        burbing = None
         if data.get('exclude_completed', False) and 'strava_token' in session:
             logger.info("Exclude completed roads option is enabled")
             access_token = session['strava_token']['access_token']
-            
-            # Initialize Burbing
-            burbing = Burbing()
-            polygon = burbing.data_loader.load_osm_data(location, select=1, buffer_dist=20)
-            burbing.add_polygon(polygon, location)
-            
-            # Get bounds from the polygon
-            minx, miny, maxx, maxy = polygon.bounds
-            logger.info(f"Area bounds: minLat={miny}, maxLat={maxy}, minLng={minx}, maxLng={maxx}")
             
             # Load and filter activities within bounds
             activities = StravaService.load_activities_from_disk(access_token)[0]
@@ -122,7 +125,7 @@ def generate_route():
             start=start_point,
             names=[location],
             select=1,
-            buffer=20,
+            buffer=buffer_degrees if 'buffer_degrees' in locals() else data.get('buffer', 500) / 111000,
             shapefile=None,
             save_fig=False,
             save_boundary=False,

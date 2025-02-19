@@ -1,4 +1,13 @@
 document.addEventListener('DOMContentLoaded', function() {
+    // Handle buffer size slider updates
+    const bufferSlider = document.getElementById('bufferSize');
+    const bufferValue = document.getElementById('bufferSizeValue');
+    if (bufferSlider && bufferValue) {
+        bufferSlider.addEventListener('input', function() {
+            bufferValue.textContent = `${this.value}m`;
+        });
+    }
+
     // Check for Strava activity fetch progress
     const urlParams = new URLSearchParams(window.location.search);
     const fetchId = document.cookie.split('; ').find(row => row.startsWith('strava_fetch_id'))?.split('=')[1];
@@ -582,6 +591,7 @@ document.addEventListener('DOMContentLoaded', function() {
             prune: document.querySelector('input[name="prune"]').checked,
             simplify_gpx: document.querySelector('input[name="simplifyGpx"]').checked,
             exclude_completed: document.querySelector('input[name="excludeCompleted"]')?.checked || false,
+            buffer: parseInt(document.getElementById('bufferSize').value), // Send buffer size in meters
             session_id: sessionId
         };
         

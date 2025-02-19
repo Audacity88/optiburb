@@ -51,7 +51,7 @@ class DataLoader:
         Args:
             location (str): Location name or description
             select (int): Which result to use from geocoding (default: 1)
-            buffer_dist (int): Buffer distance in meters around the point (default: 20)
+            buffer_dist (float): Buffer distance in degrees around the point (default: 20)
             
         Returns:
             shapely.geometry.Polygon: The polygon representing the area
@@ -68,9 +68,9 @@ class DataLoader:
             lat, lon = float(location_coords[0]), float(location_coords[1])
             logger.info(f"Found coordinates: lat={lat}, lon={lon}")
             
-            # Create a point and buffer it - using a larger buffer distance
+            # Create a point and buffer it using the provided buffer distance (already in degrees)
             point = shapely.geometry.Point(lon, lat)  # lon, lat order for Point
-            polygon = point.buffer(500 / 111000)  # Convert meters to degrees (roughly)
+            polygon = point.buffer(buffer_dist)  # buffer_dist is already in degrees
 
             return polygon
         except Exception as e:

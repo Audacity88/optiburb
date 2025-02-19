@@ -1,8 +1,7 @@
 """
-Graph Balancer Module
+Balancing Module
 
-This module handles graph balancing operations for the OptiburB system,
-including node balancing, dead end optimization, and finding connecting edges.
+This module handles graph balancing operations for the OptiburB system.
 """
 
 import networkx as nx
@@ -62,6 +61,66 @@ class GraphBalancer:
         
         return new_graph
 
+    def _ensure_connectivity(self, graph, node_coords):
+        """
+        Ensure the graph is connected by adding edges between disconnected components.
+        
+        Args:
+            graph (nx.DiGraph): The graph to connect
+            node_coords (dict): Dictionary of node coordinates
+            
+        Returns:
+            nx.DiGraph: The connected graph
+        """
+        # Find weakly connected components
+        components = list(nx.weakly_connected_components(graph))
+        if len(components) <= 1:
+            return graph
+            
+        logger.warning(f"Found {len(components)} disconnected components")
+        
+        # Create a working copy
+        working_graph = graph.copy()
+        
+        # For each component, find the closest node in any other component
+        while len(components) > 1:
+            min_distance = float('inf')
+            best_connection = None
+            
+            for i, comp1 in enumerate(components[:-1]):
+                for comp2 in components[i+1:]:
+                    for node1 in comp1:
+                        coords1 = node_coords[node1]
+                        for node2 in comp2:
+                            coords2 = node_coords[node2]
+                            distance = self.geometry.calculate_distance(coords1, coords2)
+                            if distance < min_distance:
+                                min_distance = distance
+                                best_connection = (node1, node2, distance)
+            
+            if best_connection:
+                node1, node2, distance = best_connection
+                # Add bidirectional edges between the closest nodes
+                edge_data = {
+                    'geometry': shapely.geometry.LineString([node_coords[node1], node_coords[node2]]),
+                    'length': distance,
+                    'connecting': True  # Mark this as a connecting edge
+                }
+                working_graph.add_edge(node1, node2, **edge_data)
+                # Add reverse edge with reversed geometry
+                reverse_data = edge_data.copy()
+                reverse_data['geometry'] = shapely.geometry.LineString([node_coords[node2], node_coords[node1]])
+                working_graph.add_edge(node2, node1, **reverse_data)
+                logger.info(f"Added connecting edges between components: {node1}-{node2}")
+                
+                # Recompute components
+                components = list(nx.weakly_connected_components(working_graph))
+            else:
+                logger.error("Failed to find connecting nodes between components")
+                break
+        
+        return working_graph
+
     def balance_graph(self, graph, node_coords):
         """
         Balance the graph by ensuring in-degree equals out-degree for all nodes.
@@ -75,8 +134,8 @@ class GraphBalancer:
         """
         logger.info('Processing directed graph for balancing')
         
-        # Create a working copy of the graph
-        working_graph = self._copy_graph(graph)
+        # First ensure the graph is connected
+        working_graph = self._ensure_connectivity(graph, node_coords)
         
         # Count edges with geometry at start
         edges_with_geom = sum(1 for _, _, data in working_graph.edges(data=True) if 'geometry' in data)
@@ -147,10 +206,11 @@ class GraphBalancer:
                     if edge:
                         # Store the first edge data as a template
                         if template_data is None:
-                            template_data = copy.deepcopy(edge)
-                            # Remove geometry and length from template
-                            template_data.pop('geometry', None)
-                            template_data.pop('length', None)
+                            template_data = {}
+                            # Copy only string attributes
+                            for key, value in edge.items():
+                                if isinstance(key, str) and key not in ('geometry', 'length'):
+                                    template_data[key] = str(value) if value is not None else ''
                             edge_data.update(template_data)
                         
                         # Handle geometry and length separately
@@ -161,13 +221,13 @@ class GraphBalancer:
                 # Create geometry for the new edge
                 if path_coords:
                     edge_data['geometry'] = shapely.geometry.LineString(path_coords)
-                    edge_data['length'] = path_length
+                    edge_data['length'] = float(path_length)
                 else:
                     # If no geometry found along path, create straight line
                     u_coords = node_coords[source_node]
                     v_coords = node_coords[target_node]
                     edge_data['geometry'] = shapely.geometry.LineString([u_coords, v_coords])
-                    edge_data['length'] = self.geometry.calculate_distance(u_coords, v_coords)
+                    edge_data['length'] = float(self.geometry.calculate_distance(u_coords, v_coords))
                     logger.debug(f"Created straight line geometry for {source_node}->{target_node}")
 
                 # Add balancing edge with complete edge data
@@ -192,17 +252,17 @@ class GraphBalancer:
                 template_edge = None
                 for u, v, data in working_graph.edges(data=True):
                     if 'geometry' in data:
-                        template_edge = copy.deepcopy(data)
-                        template_edge.pop('geometry', None)
-                        template_edge.pop('length', None)
-                        edge_data.update(template_edge)
+                        # Copy only string attributes
+                        for key, value in data.items():
+                            if isinstance(key, str) and key not in ('geometry', 'length'):
+                                edge_data[key] = str(value) if value is not None else ''
                         break
                 
                 # Add geometry and length
                 u_coords = node_coords[source_node]
                 v_coords = node_coords[target_node]
                 edge_data['geometry'] = shapely.geometry.LineString([u_coords, v_coords])
-                edge_data['length'] = self.geometry.calculate_distance(u_coords, v_coords)
+                edge_data['length'] = float(self.geometry.calculate_distance(u_coords, v_coords))
                 
                 working_graph.add_edge(source_node, target_node, **edge_data)
                 edges_added += 1
@@ -216,16 +276,6 @@ class GraphBalancer:
                     needs_outgoing.pop(0)
 
             iteration += 1
-
-        # Verify all edges have proper node IDs
-        invalid_edges = []
-        for u, v in working_graph.edges():
-            if not (isinstance(u, (int, str)) and isinstance(v, (int, str))):
-                invalid_edges.append((u, v))
-                logger.error(f"Invalid edge: {u}->{v}")
-        
-        if invalid_edges:
-            raise ValueError(f"Found {len(invalid_edges)} invalid edges after balancing. Edge nodes must be integers or strings.")
 
         # Count edges with geometry after balancing
         edges_with_geom_after = sum(1 for _, _, data in working_graph.edges(data=True) if 'geometry' in data)

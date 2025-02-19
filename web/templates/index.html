@@ -91,11 +91,21 @@
                                placeholder="Enter starting address">
                     </div>
 
+                    <div class="space-y-1">
+                        <label for="bufferSize" class="block text-sm font-medium text-gray-700">Search Radius</label>
+                        <div class="flex items-center space-x-2">
+                            <input type="range" id="bufferSize" name="bufferSize" 
+                                   min="100" max="2000" step="100" value="700"
+                                   class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer">
+                            <span id="bufferSizeValue" class="text-sm text-gray-600 min-w-[4rem]">700m</span>
+                        </div>
+                    </div>
+
                     <div class="space-y-4">
                         <h3 class="text-lg font-medium text-gray-900">Options</h3>
                         <div class="space-y-2">
                             <label class="flex items-center">
-                                <input type="checkbox" name="simplify" class="rounded text-blue-600">
+                                <input type="checkbox" name="simplify" class="rounded text-blue-600" checked>
                                 <span class="ml-2 text-gray-700">Simplify route</span>
                             </label>
                             <label class="flex items-center">
@@ -108,7 +118,7 @@
                             </label>
                             {% if 'strava_token' in session %}
                             <label class="flex items-center">
-                                <input type="checkbox" name="excludeCompleted" class="rounded text-blue-600" checked>
+                                <input type="checkbox" name="excludeCompleted" class="rounded text-blue-600">
                                 <span class="ml-2 text-gray-700">Exclude completed roads</span>
                             </label>
                             {% endif %}
