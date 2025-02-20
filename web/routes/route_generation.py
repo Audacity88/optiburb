@@ -181,14 +181,15 @@ def download_file(filename):
         return jsonify({'error': 'File not found'}), 404
 
 @routes.route('/route/<filename>')
-def get_route_data(filename):
+def get_route(filename):
+    """Get route data from a GPX file."""
     try:
-        route_data, error = RouteService.get_route_data(filename)
+        data, error = RouteService.get_route_data(filename)
         if error:
-            return jsonify({'error': error}), 400
-        return jsonify(route_data)
+            return jsonify({'error': error}), 500
+        return jsonify(data)
     except Exception as e:
-        logger.error(f"Error getting route data: {str(e)}")
+        logger.error(f"Error processing route data: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @routes.route('/route/<filename>/completion')
@@ -305,6 +306,10 @@ def get_route_completion(filename):
                     start_point = points[i]
                     end_point = points[i + 1]
                     
+                    # Check if either point is a straight line point
+                    is_straight_line = (hasattr(start_point, 'type') and start_point.type == 'straight_line') or \
+                                     (hasattr(end_point, 'type') and end_point.type == 'straight_line')
+                    
                     coords = [
                         [start_point.longitude, start_point.latitude],
                         [end_point.longitude, end_point.latitude]
@@ -313,6 +318,15 @@ def get_route_completion(filename):
                     route_segment = LineString(coords)
                     segment_length = route_segment.length
                     total_distance += segment_length
+                    
+                    # For straight line segments, add them to incomplete segments with the straight line flag
+                    if is_straight_line:
+                        incomplete_segments.append({
+                            "coordinates": coords,
+                            "completion": 0.0,
+                            "is_straight_line": True
+                        })
+                        continue
                     
                     try:
                         # Buffer the route segment (2 meters)
@@ -327,25 +341,29 @@ def get_route_completion(filename):
                             if overlap_ratio > 0.7:  # Consider segment completed if 70% overlaps
                                 completed_segments.append({
                                     "coordinates": coords,
-                                    "completion": 1.0
+                                    "completion": 1.0,
+                                    "is_straight_line": False
                                 })
                                 completed_distance += segment_length
                             else:
                                 incomplete_segments.append({
                                     "coordinates": coords,
-                                    "completion": overlap_ratio
+                                    "completion": overlap_ratio,
+                                    "is_straight_line": False
                                 })
-                                completed_distance += (segment_length * overlap_ratio)
+                                
                         else:
                             incomplete_segments.append({
                                 "coordinates": coords,
-                                "completion": 0.0
+                                "completion": 0.0,
+                                "is_straight_line": False
                             })
                     except Exception as e:
                         logger.error(f"Error processing segment: {str(e)}")
                         incomplete_segments.append({
                             "coordinates": coords,
-                            "completion": 0.0
+                            "completion": 0.0,
+                            "is_straight_line": False
                         })
                     
                     segments_processed += 1

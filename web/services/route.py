@@ -230,7 +230,7 @@ class RouteService:
                 for segment in track.segments:
                     route_coords = []
                     prev_point = None
-                    is_straight_line = False
+                    segment_points = []
                     
                     for point in segment.points:
                         # Update bounds
@@ -239,21 +239,8 @@ class RouteService:
                         bounds["minLng"] = min(bounds["minLng"], point.longitude)
                         bounds["maxLng"] = max(bounds["maxLng"], point.longitude)
                         
-                        # Add point to route coordinates
-                        route_coords.append([point.longitude, point.latitude])
-                        
-                        # Check if this is a straight line segment
-                        if hasattr(point, 'type') and point.type == 'straight_line':
-                            is_straight_line = True
-                        
                         # Check if this is a direction marker
-                        if hasattr(point, 'type') and point.type == 'direction' and prev_point:
-                            # Calculate bearing if not provided
-                            bearing = float(point.comment) if hasattr(point, 'comment') else calculate_bearing(
-                                prev_point.latitude, prev_point.longitude,
-                                point.latitude, point.longitude
-                            )
-                            
+                        if hasattr(point, 'type') and point.type == 'direction':
                             # Add direction marker feature
                             features.append({
                                 "type": "Feature",
@@ -263,22 +250,52 @@ class RouteService:
                                 },
                                 "properties": {
                                     "type": "direction",
-                                    "bearing": bearing
+                                    "bearing": float(point.comment) if hasattr(point, 'comment') else 0
                                 }
                             })
-                        
-                        prev_point = point
+                        else:
+                            # Add point to segment points
+                            segment_points.append([point.longitude, point.latitude])
+                            
+                            # If this is a straight line point, mark it
+                            is_straight = hasattr(point, 'type') and point.type == 'straight_line'
+                            if is_straight and len(segment_points) > 1:
+                                # Add the straight line segment
+                                features.append({
+                                    "type": "Feature",
+                                    "geometry": {
+                                        "type": "LineString",
+                                        "coordinates": segment_points[-2:]  # Just the last two points
+                                    },
+                                    "properties": {
+                                        "type": "straight_line"
+                                    }
+                                })
+                                # Start a new segment
+                                segment_points = [segment_points[-1]]
+                            elif len(segment_points) > 1 and not is_straight:
+                                # Add regular route segment
+                                features.append({
+                                    "type": "Feature",
+                                    "geometry": {
+                                        "type": "LineString",
+                                        "coordinates": segment_points[-2:]  # Just the last two points
+                                    },
+                                    "properties": {
+                                        "type": "route"
+                                    }
+                                })
                     
-                    # Add route line feature
-                    if route_coords:
+                    # Add any remaining segment
+                    if len(segment_points) > 1:
                         features.append({
                             "type": "Feature",
                             "geometry": {
                                 "type": "LineString",
-                                "coordinates": route_coords
+                                "coordinates": segment_points
                             },
                             "properties": {
-                                "type": "straight_line" if is_straight_line else "route"
+                                "type": "route"
                             }
                         })
             

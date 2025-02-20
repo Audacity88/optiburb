@@ -113,37 +113,62 @@ function displayRoute(filename) {
             initMap(center);
 
             // Add route lines first
-            const routeFeatures = data.geojson.features.filter(f => f.properties.type === 'route');
-            const directionFeatures = data.geojson.features.filter(f => f.properties.type === 'direction');
+            const routeFeatures = data.geojson.features.filter(f => 
+                !f.properties || 
+                !f.properties.type || 
+                f.properties.type === 'route' || 
+                f.properties.type === 'straight_line'
+            );
+            const directionFeatures = data.geojson.features.filter(f => 
+                f.properties && f.properties.type === 'direction'
+            );
             
+            // Log feature counts
             console.log(`Found ${routeFeatures.length} route features and ${directionFeatures.length} direction features`);
-            
+
+            // Log straight line segments specifically
+            const straightLineFeatures = routeFeatures.filter(f => f.properties && f.properties.type === 'straight_line');
+            console.log(`Found ${straightLineFeatures.length} straight line segments:`);
+            straightLineFeatures.forEach((feature, index) => {
+                const coords = feature.geometry.coordinates;
+                console.log(`Straight line segment ${index + 1}:`);
+                console.log(`  Start: (${coords[0][1]}, ${coords[0][0]})`);
+                console.log(`  End: (${coords[coords.length-1][1]}, ${coords[coords.length-1][0]})`);
+            });
+
             // Add original route to base route layer
             baseRouteLayer.clearLayers();
             
             // First add the route lines (without decorators)
-            const baseRoute = L.geoJSON(routeFeatures, {
+            const baseRoute = L.geoJSON({
+                type: "FeatureCollection",
+                features: routeFeatures
+            }, {
                 style: function(feature) {
-                    console.log('Styling feature:', feature);
-                    
-                    // Check if the feature itself is marked as a straight line
+                    // Check if the feature is marked as a straight line
                     if (feature.properties && feature.properties.type === 'straight_line') {
+                        console.log('Styling straight line segment');
                         return {
-                            color: '#999999',
-                            weight: 1,
-                            opacity: 0.3,
-                            dashArray: '5, 10'
+                            color: '#8b5cf6',  // purple color
+                            weight: 4,
+                            opacity: 1.0,
+                            dashArray: '10, 10',  // dashed line
+                            pane: 'segmentsPane'  // Use segments pane for higher z-index
                         };
                     }
                     
                     // Default style for normal roads
                     return {
-                        color: '#0000ff',
+                        color: '#0000ff',  // blue color
                         weight: 3,
-                        opacity: 0.8
+                        opacity: 0.8,
+                        pane: 'baseRoutePane'
                     };
                 }
             }).addTo(baseRouteLayer);
+            
+            // Log the number of layers added
+            console.log(`Added ${baseRoute.getLayers().length} layers to the map`);
             
             // Add direction ticks to the directions layer
             directionFeatures.forEach((feature, index) => {
@@ -277,9 +302,10 @@ function displayRoute(filename) {
                             const correctedCoords = segment.coordinates.map(coord => [coord[1], coord[0]]);
                             
                             const line = L.polyline(correctedCoords, {
-                                color: '#ef4444',  // red
-                                weight: 5,
-                                opacity: 0.8,
+                                color: segment.is_straight_line ? '#8b5cf6' : '#ef4444',  // purple for straight lines, red for others
+                                weight: segment.is_straight_line ? 4 : 5,
+                                opacity: 1.0,
+                                dashArray: segment.is_straight_line ? '10, 10' : null,
                                 pane: 'segmentsPane',
                                 interactive: true
                             });
@@ -294,9 +320,10 @@ function displayRoute(filename) {
                             const correctedCoords = segment.coordinates.map(coord => [coord[1], coord[0]]);
                             
                             const line = L.polyline(correctedCoords, {
-                                color: '#22c55e',  // green
-                                weight: 5,
-                                opacity: 0.8,
+                                color: segment.is_straight_line ? '#8b5cf6' : '#22c55e',  // purple for straight lines, green for others
+                                weight: segment.is_straight_line ? 4 : 5,
+                                opacity: 1.0,
+                                dashArray: segment.is_straight_line ? '10, 10' : null,
                                 pane: 'segmentsPane',
                                 interactive: true
                             });

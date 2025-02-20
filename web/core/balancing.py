@@ -19,6 +19,24 @@ class GraphBalancer:
         """
         self.geometry = geometry_manager
 
+    def _copy_edge_attributes(self, data):
+        """Helper method to safely copy edge attributes."""
+        edge_data = {}
+        for key, value in data.items():
+            if isinstance(key, str):
+                if key == 'geometry' and value is not None:
+                    if isinstance(value, shapely.geometry.LineString):
+                        edge_data[key] = shapely.geometry.LineString(list(value.coords))
+                    else:
+                        edge_data[key] = value
+                elif key == 'length' and value is not None:
+                    edge_data[key] = float(value)
+                elif key == 'is_straight_line':
+                    edge_data[key] = bool(value)  # Preserve boolean value
+                else:
+                    edge_data[key] = str(value) if value is not None else ''
+        return edge_data
+
     def _copy_graph(self, graph):
         """
         Create a deep copy of a graph with proper handling of edge attributes.
@@ -33,7 +51,8 @@ class GraphBalancer:
         
         # Count edges with geometry in original graph
         orig_edges_with_geom = sum(1 for _, _, data in graph.edges(data=True) if 'geometry' in data)
-        logger.info(f"Original graph has {graph.number_of_edges()} edges, {orig_edges_with_geom} with geometry")
+        orig_straight_lines = sum(1 for _, _, data in graph.edges(data=True) if data.get('is_straight_line', False))
+        logger.info(f"Original graph has {graph.number_of_edges()} edges, {orig_edges_with_geom} with geometry, {orig_straight_lines} straight lines")
         
         # Copy nodes with their attributes
         for node, data in graph.nodes(data=True):
@@ -41,9 +60,10 @@ class GraphBalancer:
         
         # Copy edges with their attributes
         edges_with_geom = 0
+        straight_lines = 0
         for u, v, data in graph.edges(data=True):
-            # Deep copy the edge data
-            edge_data = copy.deepcopy(data)
+            # Copy edge attributes
+            edge_data = self._copy_edge_attributes(data)
             
             # Special handling for geometry objects
             if 'geometry' in data:
@@ -52,12 +72,35 @@ class GraphBalancer:
                     edge_data['geometry'] = shapely.geometry.LineString(list(data['geometry'].coords))
                     if 'length' not in edge_data:
                         edge_data['length'] = edge_data['geometry'].length
+                    # Explicitly set straight line flag based on original edge
+                    # Default to False for edges with real geometry unless explicitly marked
+                    edge_data['is_straight_line'] = data.get('is_straight_line', False)
+                    if edge_data['is_straight_line']:
+                        straight_lines += 1
+                        logger.debug(f"Edge {u}->{v} preserved as straight line")
+                    else:
+                        logger.debug(f"Edge {u}->{v} preserved as real geometry")
+            else:
+                # If no geometry, create straight line
+                try:
+                    u_coords = (graph.nodes[u]['x'], graph.nodes[u]['y'])
+                    v_coords = (graph.nodes[v]['x'], graph.nodes[v]['y'])
+                    edge_data['geometry'] = shapely.geometry.LineString([u_coords, v_coords])
+                    edge_data['is_straight_line'] = True  # Mark as straight line
+                    edge_data['length'] = self.geometry.calculate_distance(u_coords, v_coords)
+                    straight_lines += 1
+                    logger.debug(f"Created straight line for edge {u}->{v} due to missing geometry")
+                except (KeyError, AttributeError) as e:
+                    logger.error(f"Cannot create geometry for edge {u}->{v}: {str(e)}")
             
             new_graph.add_edge(u, v, **edge_data)
         
         logger.info(f"Copied graph has {new_graph.number_of_edges()} edges, {edges_with_geom} with geometry")
+        logger.info(f"Straight line edges: {straight_lines}")
         if edges_with_geom != orig_edges_with_geom:
             logger.warning(f"Lost geometry information during graph copying!")
+        if straight_lines != orig_straight_lines:
+            logger.warning(f"Number of straight lines changed during copying: {orig_straight_lines} -> {straight_lines}")
         
         return new_graph
 
@@ -82,7 +125,11 @@ class GraphBalancer:
         # Create a working copy
         working_graph = graph.copy()
         
-        # For each component, find the closest node in any other component
+        # Track statistics
+        straight_lines_added = 0
+        total_edges_added = 0
+        
+        # For each component, find the closest nodes between components
         while len(components) > 1:
             min_distance = float('inf')
             best_connection = None
@@ -100,23 +147,68 @@ class GraphBalancer:
             
             if best_connection:
                 node1, node2, distance = best_connection
-                # Add bidirectional edges between the closest nodes
-                edge_data = {
-                    'geometry': shapely.geometry.LineString([node_coords[node1], node_coords[node2]]),
-                    'length': distance,
-                    'connecting': True,  # Mark this as a connecting edge
-                    'is_straight_line': True  # Mark as straight line
-                }
+                
+                # Try to find a path in the original graph
+                try:
+                    path = nx.shortest_path(graph, node1, node2, weight='length')
+                    # If we found a path, use its edges
+                    path_coords = []
+                    path_length = 0
+                    all_straight_lines = True
+                    
+                    for i in range(len(path) - 1):
+                        u, v = path[i], path[i + 1]
+                        edge_data = graph.get_edge_data(u, v)
+                        if edge_data and 'geometry' in edge_data:
+                            path_coords.extend(list(edge_data['geometry'].coords))
+                            path_length += edge_data.get('length', 0)
+                            if not edge_data.get('is_straight_line', False):
+                                all_straight_lines = False
+                    
+                    if path_coords:
+                        # Create edge using the path geometry
+                        edge_data = {
+                            'geometry': shapely.geometry.LineString(path_coords),
+                            'length': path_length,
+                            'connecting': True,
+                            'is_straight_line': all_straight_lines
+                        }
+                    else:
+                        # Fallback to straight line if no geometry
+                        edge_data = {
+                            'geometry': shapely.geometry.LineString([node_coords[node1], node_coords[node2]]),
+                            'length': distance,
+                            'connecting': True,
+                            'is_straight_line': True
+                        }
+                        straight_lines_added += 1
+                except nx.NetworkXNoPath:
+                    # No path found, create straight line
+                    edge_data = {
+                        'geometry': shapely.geometry.LineString([node_coords[node1], node_coords[node2]]),
+                        'length': distance,
+                        'connecting': True,
+                        'is_straight_line': True
+                    }
+                    straight_lines_added += 1
+                
+                # Add bidirectional edges
                 working_graph.add_edge(node1, node2, **edge_data)
-                # Add reverse edge with reversed geometry
+                # Create reverse edge with reversed geometry
                 reverse_data = edge_data.copy()
-                reverse_data['geometry'] = shapely.geometry.LineString([node_coords[node2], node_coords[node1]])
+                reverse_data['geometry'] = shapely.geometry.LineString(
+                    list(edge_data['geometry'].coords)[::-1]
+                )
                 working_graph.add_edge(node2, node1, **reverse_data)
+                total_edges_added += 2
                 
                 # Log detailed information about the connection
                 node1_info = working_graph.nodes[node1]
                 node2_info = working_graph.nodes[node2]
-                logger.debug(f"STRAIGHT_LINE: Connected components with straight line between:")
+                if edge_data.get('is_straight_line', False):
+                    logger.debug(f"STRAIGHT_LINE: Connected components with straight line between:")
+                else:
+                    logger.debug(f"Connected components with real road geometry between:")
                 logger.debug(f"  Node1 ({node1}): {node1_info.get('name', 'unnamed')} at ({node_coords[node1][0]:.6f}, {node_coords[node1][1]:.6f})")
                 logger.debug(f"  Node2 ({node2}): {node2_info.get('name', 'unnamed')} at ({node_coords[node2][0]:.6f}, {node_coords[node2][1]:.6f})")
                 logger.debug(f"  Distance: {distance:.2f}, Edge attributes: {edge_data}")
@@ -126,6 +218,21 @@ class GraphBalancer:
             else:
                 logger.error("Failed to find connecting nodes between components")
                 break
+        
+        if total_edges_added > 0:
+            logger.info(f"Component connection summary:")
+            logger.info(f"  - Total edges added: {total_edges_added}")
+            logger.info(f"  - Straight line edges added: {straight_lines_added}")
+            logger.info(f"  - Real geometry edges added: {total_edges_added - straight_lines_added}")
+        
+        # Verify edge attributes
+        total_edges = working_graph.number_of_edges()
+        edges_with_geom = sum(1 for _, _, data in working_graph.edges(data=True) if 'geometry' in data)
+        straight_lines = sum(1 for _, _, data in working_graph.edges(data=True) if data.get('is_straight_line', False))
+        logger.info(f"Final graph state after connectivity:")
+        logger.info(f"  - Total edges: {total_edges}")
+        logger.info(f"  - Edges with geometry: {edges_with_geom}")
+        logger.info(f"  - Straight line edges: {straight_lines}")
         
         return working_graph
 
@@ -202,6 +309,7 @@ class GraphBalancer:
         logger.info(f"Nodes needing outgoing edges: {len(needs_outgoing)}")
 
         edges_added = 0
+        straight_lines_added = 0
         max_iterations = 1000
         iteration = 0
 
@@ -218,6 +326,8 @@ class GraphBalancer:
                 path_coords = []
                 path_length = 0
                 template_data = None
+                all_straight_lines = True  # Track if all segments are straight lines
+                has_real_geometry = False  # Track if we found any real geometry
                 
                 # Collect all edge data along the path
                 for i in range(len(path) - 1):
@@ -237,18 +347,25 @@ class GraphBalancer:
                         if 'geometry' in edge:
                             path_coords.extend(list(edge['geometry'].coords))
                             path_length += edge.get('length', 0)
+                            # Track if any segment is not a straight line
+                            if not edge.get('is_straight_line', False):
+                                all_straight_lines = False
+                                has_real_geometry = True
 
                 # Create geometry for the new edge
-                if path_coords:
+                if path_coords and has_real_geometry:
                     edge_data['geometry'] = shapely.geometry.LineString(path_coords)
                     edge_data['length'] = float(path_length)
+                    edge_data['is_straight_line'] = False  # If we found real geometry, use it
+                    logger.debug(f"Created edge with real geometry from path {source_node}->{target_node}")
                 else:
-                    # If no geometry found along path, create straight line
+                    # If no real geometry found along path, create straight line
                     u_coords = node_coords[source_node]
                     v_coords = node_coords[target_node]
                     edge_data['geometry'] = shapely.geometry.LineString([u_coords, v_coords])
                     edge_data['length'] = float(self.geometry.calculate_distance(u_coords, v_coords))
-                    edge_data['is_straight_line'] = True
+                    edge_data['is_straight_line'] = True  # This is a straight line
+                    straight_lines_added += 1
                     logger.debug(f"Created straight line geometry for {source_node}->{target_node}")
 
                 # Add balancing edge with complete edge data
@@ -284,7 +401,8 @@ class GraphBalancer:
                 v_coords = node_coords[target_node]
                 edge_data['geometry'] = shapely.geometry.LineString([u_coords, v_coords])
                 edge_data['length'] = float(self.geometry.calculate_distance(u_coords, v_coords))
-                edge_data['is_straight_line'] = True
+                edge_data['is_straight_line'] = True  # This is a straight line
+                straight_lines_added += 1
                 
                 working_graph.add_edge(source_node, target_node, **edge_data)
                 edges_added += 1
@@ -301,21 +419,10 @@ class GraphBalancer:
 
         # Count edges with geometry after balancing
         edges_with_geom_after = sum(1 for _, _, data in working_graph.edges(data=True) if 'geometry' in data)
+        final_straight_lines = sum(1 for _, _, data in working_graph.edges(data=True) if data.get('is_straight_line', False))
         logger.info(f"After balancing: {working_graph.number_of_edges()} total edges, {edges_with_geom_after} with geometry")
         logger.info(f"Added {edges_added} balancing edges in {iteration} iterations")
-        
-        # Count and log final straight line edges
-        final_straight_lines = sum(1 for _, _, data in working_graph.edges(data=True) if data.get('is_straight_line', False))
         logger.info(f"Final graph state: added {final_straight_lines - straight_lines} new straight line edges")
-        logger.debug("Final straight line edges:")
-        for u, v, data in working_graph.edges(data=True):
-            if data.get('is_straight_line', False):
-                u_info = working_graph.nodes[u]
-                v_info = working_graph.nodes[v]
-                logger.debug(f"STRAIGHT_LINE: {u}->{v}")
-                logger.debug(f"  From: {u_info.get('name', 'unnamed')} at ({node_coords[u][0]:.6f}, {node_coords[u][1]:.6f})")
-                logger.debug(f"  To: {v_info.get('name', 'unnamed')} at ({node_coords[v][0]:.6f}, {node_coords[v][1]:.6f})")
-                logger.debug(f"  Edge attributes: {data}")
         
         return working_graph
 
@@ -350,6 +457,7 @@ class GraphBalancer:
         
         logger.info(f"Found {len(deadends)} dead ends to optimize")
         edges_added = 0
+        straight_lines_added = 0
         
         for deadend in deadends:
             # Check incoming edges
@@ -372,6 +480,10 @@ class GraphBalancer:
                         edge_data['geometry'] = shapely.geometry.LineString(
                             list(edge_data['geometry'].coords)[::-1]
                         )
+                        # Preserve the is_straight_line flag from the original edge
+                        edge_data['is_straight_line'] = data.get('is_straight_line', False)
+                        if edge_data['is_straight_line']:
+                            straight_lines_added += 1
                     working_graph.add_edge(target, source, **edge_data)
                     edges_added += 1
                     logger.info(f"Added return edge for dead end: {target}->{source}")
@@ -387,11 +499,15 @@ class GraphBalancer:
                         edge_data['geometry'] = shapely.geometry.LineString(
                             list(edge_data['geometry'].coords)[::-1]
                         )
+                        # Preserve the is_straight_line flag from the original edge
+                        edge_data['is_straight_line'] = data.get('is_straight_line', False)
+                        if edge_data['is_straight_line']:
+                            straight_lines_added += 1
                     working_graph.add_edge(target, source, **edge_data)
                     edges_added += 1
                     logger.info(f"Added return edge for dead end: {target}->{source}")
         
-        logger.info(f"Added {edges_added} return edges for dead ends")
+        logger.info(f"Added {edges_added} return edges for dead ends ({straight_lines_added} straight lines)")
         
         # Verify the graph remains balanced
         unbalanced_nodes = []
@@ -513,10 +629,28 @@ class GraphBalancer:
         try:
             u_coords = node_coords[u]
             v_coords = node_coords[v]
-            edge_data['geometry'] = shapely.geometry.LineString([u_coords, v_coords])
-            edge_data['is_straight_line'] = True  # Mark this as a straight line edge
-            edges_to_add.append((u, v, edge_data))
-            logger.warning(f"Created straight line geometry for edge {u}-{v} - STRAIGHT LINE WILL BE VISIBLE IN ROUTE")
+            
+            # Create a new edge data dictionary
+            new_edge_data = {}
+            
+            # Copy non-geometry attributes from original edge data
+            for key, value in edge_data.items():
+                if key not in ('geometry', 'length', 'is_straight_line'):
+                    if isinstance(value, bool):
+                        new_edge_data[key] = bool(value)
+                    elif isinstance(value, (int, float)):
+                        new_edge_data[key] = type(value)(value)
+                    else:
+                        new_edge_data[key] = str(value) if value is not None else ''
+            
+            # Add straight line geometry and attributes
+            new_edge_data['geometry'] = shapely.geometry.LineString([u_coords, v_coords])
+            new_edge_data['length'] = self.geometry.calculate_distance(u_coords, v_coords)
+            new_edge_data['is_straight_line'] = True  # Explicitly mark as straight line
+            
+            edges_to_add.append((u, v, new_edge_data))
+            logger.debug(f"Created straight line edge {u}-{v} with length {new_edge_data['length']:.2f}")
+            
         except Exception as e:
             logger.error(f"Error creating straight line edge {u}-{v}: {str(e)}")
 

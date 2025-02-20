@@ -42,6 +42,7 @@ class RouteGenerator:
         
         # Helper function to safely copy edge data
         def copy_edge_data(data):
+            """Helper function to safely copy edge data while preserving types."""
             edge_data = {}
             for key, value in data.items():
                 if isinstance(key, str):
@@ -49,6 +50,8 @@ class RouteGenerator:
                         edge_data[key] = value
                     elif key == 'length' and value is not None:
                         edge_data[key] = float(value)
+                    elif key == 'is_straight_line':
+                        edge_data[key] = bool(value)  # Preserve boolean value
                     else:
                         edge_data[key] = str(value) if value is not None else ''
             return edge_data
@@ -349,7 +352,7 @@ class RouteGenerator:
             completed_area: Optional shapely.geometry.Polygon of completed roads to exclude
             
         Returns:
-            list: The Eulerian circuit as a list of node pairs
+            list: The Eulerian circuit as a list of node pairs with edge data
         """
         logger.info('Starting to find Eulerian circuit in directed graph')
         
@@ -357,6 +360,17 @@ class RouteGenerator:
         if completed_area is not None:
             graph = self.filter_completed_roads(graph, completed_area)
             logger.info(f"Working with filtered graph containing {graph.number_of_edges()} edges")
+        
+        # Count initial straight lines and store edge data
+        initial_straight_lines = 0
+        edge_data_map = {}  # Store edge data keyed by (u,v)
+        for u, v, data in graph.edges(data=True):
+            edge_data_map[(u,v)] = data.copy()  # Make a copy to preserve all attributes
+            if data.get('is_straight_line', False):
+                initial_straight_lines += 1
+                logger.debug(f"Found straight line edge {u}->{v} in input graph")
+        
+        logger.info(f"Input graph has {initial_straight_lines} straight line edges")
         
         # If no start node specified, use any node
         if start_node is None:
@@ -383,11 +397,30 @@ class RouteGenerator:
         # Find Eulerian circuit
         try:
             # For directed graphs, we use nx.eulerian_circuit directly
-            self.euler_circuit = list(nx.eulerian_circuit(graph, source=start_node))
-            logger.info(f"Found initial Eulerian circuit with {len(self.euler_circuit)} edges")
+            circuit = list(nx.eulerian_circuit(graph, source=start_node))
+            logger.info(f"Found initial Eulerian circuit with {len(circuit)} edges")
+            
+            # Create a new list that includes edge data
+            self.euler_circuit = []
+            straight_lines = 0
+            for u, v in circuit:
+                # Get edge data from our stored map
+                edge_data = edge_data_map.get((u,v))
+                if edge_data is None:
+                    logger.warning(f"No edge data found for edge {(u,v)}")
+                    edge_data = {}
+                else:
+                    # Verify straight line flag is preserved
+                    if edge_data.get('is_straight_line', False):
+                        straight_lines += 1
+                        logger.debug(f"Found straight line edge {u}->{v} in circuit")
+                
+                self.euler_circuit.append((u, v, edge_data))
+            
+            logger.info(f"Circuit contains {straight_lines} straight line edges")
             
             # Verify all edges are included
-            circuit_edges = set((u,v) for u,v in self.euler_circuit)
+            circuit_edges = set((u,v) for u,v,_ in self.euler_circuit)
             all_edges = set(graph.edges())
             missing_edges = all_edges - circuit_edges
             
@@ -396,6 +429,19 @@ class RouteGenerator:
                 for edge in missing_edges:
                     logger.error(f"Missing edge: {edge}")
                 raise ValueError(f"Circuit is incomplete. Missing {len(missing_edges)} edges.")
+            
+            # Verify straight line count matches
+            if straight_lines != initial_straight_lines:
+                logger.warning(f"Straight line count mismatch: {straight_lines} in circuit vs {initial_straight_lines} in input graph")
+                # Log details of straight line edges for debugging
+                logger.debug("Straight line edges in input graph:")
+                for (u,v), data in edge_data_map.items():
+                    if data.get('is_straight_line', False):
+                        logger.debug(f"  {u}->{v}")
+                logger.debug("Straight line edges in circuit:")
+                for u, v, data in self.euler_circuit:
+                    if data.get('is_straight_line', False):
+                        logger.debug(f"  {u}->{v}")
             
             logger.info("Successfully verified circuit includes all edges")
             return self.euler_circuit
@@ -413,7 +459,7 @@ class RouteGenerator:
         
         Args:
             graph (nx.DiGraph): The graph containing the edges
-            edges (list): List of edges to include in the track
+            edges (list): List of edges with data (u, v, data) to include in the track
             simplify (bool): Whether to simplify the resulting GPX
             
         Returns:
@@ -427,20 +473,15 @@ class RouteGenerator:
         logger.info('Creating GPX track with direction indicators')
         logger.info(f'Number of edges to process: {len(edges)}')
 
-        # Log all straight line edges at start
-        logger.debug("Straight line edges in route:")
-        for u, v in edges:
-            edge_data = graph.get_edge_data(u, v)
-            if edge_data and edge_data.get('is_straight_line', False):
-                u_info = graph.nodes[u]
-                v_info = graph.nodes[v]
-                straight_line_edges += 1
-                logger.debug(f"STRAIGHT_LINE: {u}->{v}")
-                logger.debug(f"  From: {u_info.get('name', 'unnamed')} at ({u_info.get('x', '?'):.6f}, {u_info.get('y', '?'):.6f})")
-                logger.debug(f"  To: {v_info.get('name', 'unnamed')} at ({v_info.get('x', '?'):.6f}, {v_info.get('y', '?'):.6f})")
-                logger.debug(f"  Edge attributes: {edge_data}")
-
-        logger.info(f"Route contains {straight_line_edges} straight line edges out of {len(edges)} total edges")
+        # First count straight line edges in input and store them for verification
+        straight_line_set = set()  # Store (u,v) pairs for straight line edges
+        initial_straight_lines = 0
+        for u, v, data in edges:
+            if data and data.get('is_straight_line', False):
+                initial_straight_lines += 1
+                straight_line_set.add((u,v))
+                logger.debug(f"Input edge {u}->{v} is marked as straight line")
+        logger.info(f"Input graph has {initial_straight_lines} straight line edges")
 
         gpx = gpxpy.gpx.GPX()
         gpx.name = f'optiburb_route'
@@ -449,26 +490,32 @@ class RouteGenerator:
         gpx.description = 'Generated route with direction indicators'
         gpx.keywords = 'directed route,one-way streets'
 
-        track = gpxpy.gpx.GPXTrack()
-        track.name = 'optiburb_track'
-        track.type = 'directed'
-        gpx.tracks.append(track)
+        # Create two tracks: one for real roads and one for straight lines
+        real_track = gpxpy.gpx.GPXTrack()
+        real_track.name = 'optiburb_real_roads'
+        real_track.type = 'directed'
+        gpx.tracks.append(real_track)
 
-        segment = gpxpy.gpx.GPXTrackSegment()
-        track.segments.append(segment)
+        straight_track = gpxpy.gpx.GPXTrack()
+        straight_track.name = 'optiburb_straight_lines'
+        straight_track.type = 'balancing'
+        gpx.tracks.append(straight_track)
+
+        real_segment = gpxpy.gpx.GPXTrackSegment()
+        real_track.segments.append(real_segment)
+
+        straight_segment = gpxpy.gpx.GPXTrackSegment()
+        straight_track.segments.append(straight_segment)
 
         i = 1
         arrow_interval = 3  # Add direction arrow every 3 points
-        logger.info(f'Using arrow interval of {arrow_interval} points')
 
-        for n, edge in enumerate(edges):
-            u, v = edge
-            edge_data = graph.get_edge_data(u, v)
-
-            logger.debug('EDGE [%d] - edge=%s, data=%s', n, edge, edge_data)
-
+        for n, (u, v, edge_data) in enumerate(edges):
+            # First check if this edge was originally marked as straight line
+            original_is_straight = (u,v) in straight_line_set
+            
             if edge_data is None:
-                logger.warning('null data for edge %s', edge)
+                logger.warning('null data for edge %s', (u,v))
                 try:
                     u_coords = (graph.nodes[u]['x'], graph.nodes[u]['y'])
                     v_coords = (graph.nodes[v]['x'], graph.nodes[v]['y'])
@@ -477,28 +524,26 @@ class RouteGenerator:
                         'is_straight_line': True,
                         'length': self.geometry.calculate_distance(u_coords, v_coords)
                     }
-                    logger.debug(f"STRAIGHT_LINE: Created new straight line for null edge {u}->{v}")
-                    logger.debug(f"  From: ({u_coords[0]:.6f}, {u_coords[1]:.6f})")
-                    logger.debug(f"  To: ({v_coords[0]:.6f}, {v_coords[1]:.6f})")
-                    logger.debug(f"  Edge attributes: {edge_data}")
+                    straight_line_edges += 1
+                    logger.debug(f"Created straight line for edge {(u,v)}")
                 except (KeyError, AttributeError) as e:
-                    logger.error(f"Cannot create straight line for edge {edge}: {str(e)}")
+                    logger.error(f"Cannot create straight line for edge {(u,v)}: {str(e)}")
                     continue
+
+            # Get edge attributes and explicitly check is_straight_line flag
+            is_straight_line = original_is_straight or edge_data.get('is_straight_line', False)
+            if is_straight_line:
+                straight_line_edges += 1
+                logger.debug(f"Processing straight line edge {(u,v)}")
 
             linestring = edge_data.get('geometry')
             augmented = edge_data.get('augmented')
-            is_straight_line = edge_data.get('is_straight_line', False)
             
-            # Only add to distance if not a straight line
-            if not is_straight_line:
-                stats_distance += edge_data.get('length', 0)
-            else:
-                logger.debug(f"STRAIGHT_LINE: Excluding distance for straight line edge {u}->{v}")
-
-            logger.debug(' leg [%d] -> %s (%s,%s,%s,%s,%s)', n, edge_data.get('name', ''), 
-                        edge_data.get('highway', ''), edge_data.get('surface', ''), 
-                        edge_data.get('oneway', ''), edge_data.get('access', ''), 
-                        edge_data.get('length', 0))
+            # Calculate distance for all edges
+            if 'length' in edge_data:
+                stats_distance += edge_data['length']
+                if augmented:
+                    stats_backtrack += edge_data['length']
 
             coords_to_use = None
             if linestring:
@@ -508,14 +553,12 @@ class RouteGenerator:
                         coords_list = list(linestring.coords)
                         if coords_list:
                             coords_to_use = coords_list
-                            logger.debug(f'Extracted {len(coords_to_use)} coordinates from LineString')
-                    
+                
                     # If we couldn't get coords directly, try directional linestring
                     if not coords_to_use:
-                        directional_coords = self.geometry.get_directional_linestring(edge, linestring, graph.nodes)
+                        directional_coords = self.geometry.get_directional_linestring((u,v), linestring, graph.nodes)
                         if directional_coords:
                             coords_to_use = directional_coords
-                            logger.debug(f'Using directional linestring with {len(coords_to_use)} points')
                 except Exception as e:
                     logger.error(f"Error extracting coordinates from LineString: {str(e)}")
 
@@ -524,31 +567,35 @@ class RouteGenerator:
                     u_coords = (graph.nodes[u]['x'], graph.nodes[u]['y'])
                     v_coords = (graph.nodes[v]['x'], graph.nodes[v]['y'])
                     coords_to_use = [u_coords, v_coords]
-                    edge_data['is_straight_line'] = True
+                    # Only create straight line if we had to generate new coordinates and it wasn't already straight
+                    if not is_straight_line:
+                        is_straight_line = True
+                        straight_line_edges += 1
+                        logger.debug(f"Created straight line coordinates for edge {(u,v)} due to missing coordinates")
                     edge_data['length'] = self.geometry.calculate_distance(u_coords, v_coords)
-                    logger.debug(f"STRAIGHT_LINE: Created straight line for missing coords {u}->{v}")
-                    logger.debug(f"  From: ({u_coords[0]:.6f}, {u_coords[1]:.6f})")
-                    logger.debug(f"  To: ({v_coords[0]:.6f}, {v_coords[1]:.6f})")
-                    logger.debug(f"  Edge attributes: {edge_data}")
                 except (KeyError, AttributeError) as e:
-                    logger.error(f"Cannot create straight line for edge {edge}: {str(e)}")
+                    logger.error(f"Cannot create straight line coordinates for edge {(u,v)}: {str(e)}")
                     continue
 
             if not coords_to_use:
-                logger.error(f"No valid coordinates found for edge {edge}")
+                logger.error(f"No valid coordinates found for edge {(u,v)}")
                 continue
 
-            # Add points to the track segment
+            # Choose which segment to add points to
+            target_segment = straight_segment if is_straight_line else real_segment
+
+            # Add points to the appropriate track segment
             for j, coord in enumerate(coords_to_use):
                 point = gpxpy.gpx.GPXTrackPoint(coord[1], coord[0])
                 
-                # Add type attribute for straight lines
-                if is_straight_line:
-                    point.type = 'straight_line'
+                # Set point type based on whether it's a straight line
+                point.type = 'straight_line' if is_straight_line else 'route'
+                if j == 0:  # Log for first point of each edge
+                    logger.debug(f"Edge {(u,v)} marked as {'straight line' if is_straight_line else 'route'} in GPX")
                 
-                segment.points.append(point)
+                target_segment.points.append(point)
                 
-                # Add direction markers only for real roads
+                # Add direction markers only for real roads (not straight lines)
                 if not is_straight_line and j > 0 and j < len(coords_to_use) and (i + j) % arrow_interval == 0:
                     # Create direction marker point
                     marker = gpxpy.gpx.GPXTrackPoint(coord[1], coord[0])
@@ -561,59 +608,79 @@ class RouteGenerator:
                         coord[1], coord[0]
                     )
                     marker.comment = str(bearing)
-                    segment.points.append(marker)
+                    target_segment.points.append(marker)
                     total_direction_markers += 1
 
             i += len(coords_to_use)
 
-            if edge_data.get('augmented', False):
-                stats_backtrack += edge_data.get('length', 0)
-
-        # Verify we have points in the segment
-        if not segment.points:
+        # Verify we have points in at least one segment
+        if not real_segment.points and not straight_segment.points:
             raise ValueError("No valid points were added to the GPX track")
+
+        # Verify straight line count matches input
+        if straight_line_edges != initial_straight_lines:
+            logger.warning(f"Straight line count mismatch in GPX: found {straight_line_edges}, expected {initial_straight_lines}")
+            logger.debug("Original straight line edges:")
+            for u, v in straight_line_set:
+                logger.debug(f"  {u}->{v}")
 
         logger.info('total distance = %.2fkm', stats_distance/1000.0)
         logger.info('backtrack distance = %.2fkm', stats_backtrack/1000.0)
         logger.info(f'Total direction markers added to GPX: {total_direction_markers}')
+        logger.info(f'Total straight line edges in GPX: {straight_line_edges}')
         
         if simplify:
             logger.info('simplifying GPX')
-            # Store direction markers before simplification
-            direction_markers = []
-            for point in segment.points:
-                if hasattr(point, 'type') and point.type == 'direction':
-                    direction_markers.append(point)
+            # Store direction markers and point types before simplification
+            point_data = []
+            for segment in [real_segment, straight_segment]:
+                for point in segment.points:
+                    if hasattr(point, 'type'):
+                        point_data.append({
+                            'lat': point.latitude,
+                            'lon': point.longitude,
+                            'type': point.type,
+                            'comment': point.comment if hasattr(point, 'comment') else None
+                        })
             
-            # Remove direction markers temporarily
-            segment.points = [p for p in segment.points if not (hasattr(p, 'type') and p.type == 'direction')]
+            # Remove direction markers temporarily from real roads segment
+            real_segment.points = [p for p in real_segment.points if not (hasattr(p, 'type') and p.type == 'direction')]
             
-            # Simplify the track
+            # Simplify both tracks
             gpx.simplify()
             
-            # Re-add direction markers at appropriate intervals
-            simplified_points = segment.points[:]
-            segment.points = []
+            # Re-add point types and direction markers to real roads
+            simplified_points = real_segment.points[:]
+            real_segment.points = []
             
             arrow_interval = max(3, len(simplified_points) // (total_direction_markers + 1))
             for i, point in enumerate(simplified_points):
-                segment.points.append(point)
+                # Try to find matching original point to preserve type
+                closest_original = min(point_data, key=lambda p: 
+                    abs(p['lat'] - point.latitude) + abs(p['lon'] - point.longitude))
+                
+                point.type = 'route'  # All points in real_segment are routes
+                real_segment.points.append(point)
+                
+                # Add direction markers at intervals
                 if i > 0 and i < len(simplified_points) - 1 and i % arrow_interval == 0:
-                    # Create new direction marker
                     marker = gpxpy.gpx.GPXTrackPoint(
                         latitude=point.latitude,
                         longitude=point.longitude
                     )
                     marker.type = 'direction'
                     marker.symbol = '➜'
-                    # Calculate bearing to next point
                     next_point = simplified_points[i + 1]
                     bearing = self.geometry.calculate_bearing(
                         point.latitude, point.longitude,
                         next_point.latitude, next_point.longitude
                     )
                     marker.comment = str(round(bearing, 1))
-                    segment.points.append(marker)
+                    real_segment.points.append(marker)
+
+            # Mark all points in straight line segment
+            for point in straight_segment.points:
+                point.type = 'straight_line'
 
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f'optiburb_route_{timestamp}.gpx'

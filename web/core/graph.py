@@ -63,8 +63,12 @@ class GraphManager:
         
         # Transfer edge geometries from GeoDataFrame back to graph
         edges_with_geom = 0
+        straight_lines = 0
+        total_edges = len(edges)
+        logger.info(f"Processing {total_edges} edges from OSM data")
+        
         for idx, edge_data in edges.iterrows():
-            u, v, k = idx  # GeoDataFrame index contains (u, v, key)
+            u, v, k = idx
             if 'geometry' in edge_data and edge_data['geometry'] is not None:
                 # Get existing edge data
                 edge_attrs = self.g.get_edge_data(u, v, k).copy()
@@ -73,14 +77,47 @@ class GraphManager:
                 # Add length if not present
                 if 'length' not in edge_attrs:
                     edge_attrs['length'] = edge_data['geometry'].length
+                # Mark as NOT a straight line since it has real OSM geometry
+                edge_attrs['is_straight_line'] = False
                 # Update edge in graph
                 self.g.remove_edge(u, v)
                 self.g.add_edge(u, v, **edge_attrs)
                 edges_with_geom += 1
+                if edges_with_geom % 100 == 0:
+                    logger.info(f"Processed {edges_with_geom} edges with geometry")
+                logger.debug(f"Edge {u}->{v} marked with OSM geometry, is_straight_line=False")
+            else:
+                # If no geometry, create straight line
+                try:
+                    u_coords = (self.g.nodes[u]['x'], self.g.nodes[u]['y'])
+                    v_coords = (self.g.nodes[v]['x'], self.g.nodes[v]['y'])
+                    edge_attrs = self.g.get_edge_data(u, v, k).copy()
+                    edge_attrs['geometry'] = osmnx.utils_graph.make_linestring((u_coords, v_coords))
+                    edge_attrs['length'] = edge_attrs['geometry'].length
+                    edge_attrs['is_straight_line'] = True  # Mark as straight line
+                    self.g.remove_edge(u, v)
+                    self.g.add_edge(u, v, **edge_attrs)
+                    straight_lines += 1
+                    logger.debug(f"Edge {u}->{v} created with straight line geometry, is_straight_line=True")
+                except Exception as e:
+                    logger.error(f"Could not create straight line geometry for edge {u}->{v}: {str(e)}")
         
         logger.info(f"Edge geometry statistics:")
-        logger.info(f"  - Total edges: {len(edges)}")
-        logger.info(f"  - Edges with geometry: {edges_with_geom}")
+        logger.info(f"  - Total edges: {total_edges}")
+        logger.info(f"  - Edges with OSM geometry: {edges_with_geom}")
+        logger.info(f"  - Edges using straight lines: {straight_lines}")
+        
+        # Verify edge attributes after processing
+        actual_straight_lines = sum(1 for _, _, data in self.g.edges(data=True) if data.get('is_straight_line', False))
+        actual_real_geom = sum(1 for _, _, data in self.g.edges(data=True) if not data.get('is_straight_line', False))
+        logger.info(f"Final edge verification:")
+        logger.info(f"  - Edges marked as straight lines: {actual_straight_lines}")
+        logger.info(f"  - Edges marked as real geometry: {actual_real_geom}")
+        
+        if actual_straight_lines != straight_lines:
+            logger.warning(f"Mismatch in straight line count: expected {straight_lines}, got {actual_straight_lines}")
+        if actual_real_geom != edges_with_geom:
+            logger.warning(f"Mismatch in real geometry count: expected {edges_with_geom}, got {actual_real_geom}")
         
         # Log coordinate statistics
         nodes_with_coords = sum(1 for n in self.g.nodes if 'x' in self.g.nodes[n] and 'y' in self.g.nodes[n])
@@ -104,6 +141,25 @@ class GraphManager:
     def simplify_graph(self):
         """Simplify the graph by removing redundant nodes."""
         logger.info('Simplifying graph')
+        
+        # Count edges before simplification
+        orig_straight_lines = sum(1 for _, _, data in self.g.edges(data=True) if data.get('is_straight_line', False))
+        orig_real_geom = sum(1 for _, _, data in self.g.edges(data=True) if not data.get('is_straight_line', False))
+        logger.info(f"Before simplification:")
+        logger.info(f"  - Total edges: {self.g.number_of_edges()}")
+        logger.info(f"  - Edges marked as straight lines: {orig_straight_lines}")
+        logger.info(f"  - Edges with real geometry: {orig_real_geom}")
+        
+        # Store edge attributes before simplification
+        edge_attrs = {}
+        for u, v, data in self.g.edges(data=True):
+            edge_attrs[(u, v)] = {
+                'is_straight_line': data.get('is_straight_line', False),
+                'geometry': data.get('geometry', None)
+            }
+            logger.debug(f"Storing attributes for edge {u}->{v}: is_straight_line={edge_attrs[(u, v)]['is_straight_line']}")
+        
+        # Simplify the graph
         self.g = osmnx.simplification.simplify_graph(self.g, strict=False, remove_rings=False)
         
         # Restore coordinates after simplification
@@ -113,13 +169,60 @@ class GraphManager:
                 self.g.nodes[node]['x'] = x
                 self.g.nodes[node]['y'] = y
         
-        # Ensure coordinates are preserved after simplification
-        nodes_with_coords = sum(1 for n in self.g.nodes if 'x' in self.g.nodes[n] and 'y' in self.g.nodes[n])
-        logger.info(f"After simplification:")
-        logger.info(f"  - Remaining nodes: {len(self.g.nodes)}")
-        logger.info(f"  - Nodes with coordinates: {nodes_with_coords}")
+        # Track new edges created during simplification
+        new_edges = 0
+        restored_edges = 0
+        straight_lines = 0
+        real_geom = 0
         
-        # Update working copy
+        # Restore edge attributes after simplification
+        for u, v, data in self.g.edges(data=True):
+            # Check if this edge existed before simplification
+            if (u, v) in edge_attrs:
+                data['is_straight_line'] = edge_attrs[(u, v)]['is_straight_line']
+                if data['is_straight_line']:
+                    straight_lines += 1
+                else:
+                    real_geom += 1
+                restored_edges += 1
+                logger.debug(f"Restored attributes for edge {u}->{v}: is_straight_line={data['is_straight_line']}")
+            else:
+                # If this is a new edge created during simplification, mark it based on geometry
+                if 'geometry' in data:
+                    data['is_straight_line'] = False
+                    real_geom += 1
+                    logger.debug(f"New edge {u}->{v} has geometry, marking as real road")
+                else:
+                    # Create straight line geometry
+                    try:
+                        u_coords = (self.g.nodes[u]['x'], self.g.nodes[u]['y'])
+                        v_coords = (self.g.nodes[v]['x'], self.g.nodes[v]['y'])
+                        data['geometry'] = osmnx.utils_graph.make_linestring((u_coords, v_coords))
+                        data['length'] = data['geometry'].length
+                        data['is_straight_line'] = True
+                        straight_lines += 1
+                        logger.debug(f"Created straight line geometry for new edge {u}->{v}")
+                    except Exception as e:
+                        logger.error(f"Could not create straight line geometry for edge {u}->{v}: {str(e)}")
+                new_edges += 1
+        
+        # Count edges after simplification
+        final_straight_lines = sum(1 for _, _, data in self.g.edges(data=True) if data.get('is_straight_line', False))
+        final_real_geom = sum(1 for _, _, data in self.g.edges(data=True) if not data.get('is_straight_line', False))
+        
+        logger.info(f"After simplification:")
+        logger.info(f"  - Total edges: {self.g.number_of_edges()}")
+        logger.info(f"  - Restored edges: {restored_edges}")
+        logger.info(f"  - New edges: {new_edges}")
+        logger.info(f"  - Edges marked as straight lines: {final_straight_lines}")
+        logger.info(f"  - Edges with real geometry: {final_real_geom}")
+        
+        if final_straight_lines != straight_lines:
+            logger.warning(f"Mismatch in straight line count after simplification: counted {straight_lines}, got {final_straight_lines}")
+        if final_real_geom != real_geom:
+            logger.warning(f"Mismatch in real geometry count after simplification: counted {real_geom}, got {final_real_geom}")
+        
+        # Create working copy
         self.g_working = self.g.copy()
 
     def prune_graph(self):
