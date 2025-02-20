@@ -130,8 +130,9 @@ class Burbing:
 
 def main():
     parser = argparse.ArgumentParser(description='Optimum Suburb Route Generator')
-    parser.add_argument('names', type=str, nargs=argparse.REMAINDER, help='suburb names with state, country, etc')
+    parser.add_argument('location', type=str, help='location name (e.g. "West Hartford, CT")')
     parser.add_argument('--debug', type=str, default='info', help='debug level debug, info, warn, etc')
+    parser.add_argument('--log-file', type=str, help='file to write logs to')
     parser.add_argument('--start', type=str, help='optional starting address')
     parser.add_argument('--prune', default=False, action='store_true', help='prune unnamed gravel tracks')
     parser.add_argument('--simplify', default=False, action='store_true', help='simplify OSM nodes on load')
@@ -139,32 +140,42 @@ def main():
     parser.add_argument('--complex-gpx', dest='simplify_gpx', action='store_false', help='leave all the OSM points in the GPX output')
     parser.add_argument('--select', type=int, default=1, help='select the nth item from the search results')
     parser.add_argument('--shapefile', type=str, default=None, help='filename of shapefile to load localities, comma separated by the column to match on')
-    parser.add_argument('--buffer', type=int, dest='buffer', default=20, help='buffer distance around polygon')
+    parser.add_argument('--buffer', type=int, dest='buffer', default=500, help='buffer distance in meters around polygon')
     parser.add_argument('--save-fig', default=False, action='store_true', help='save an SVG image of the nodes and edges')
 
     args = parser.parse_args()
 
-    logger.setLevel(logging.getLevelName(args.debug.upper()))
+    # Configure logging
+    log_level = logging.getLevelName(args.debug.upper())
+    logger.setLevel(log_level)
+    
+    # Add file handler if log file specified
+    if args.log_file:
+        file_handler = logging.FileHandler(args.log_file)
+        file_handler.setLevel(log_level)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        logger.info('Logging to file: %s', args.log_file)
+
     logger.debug('called with args - %s', args)
 
     start_time = datetime.datetime.now()
 
     burbing = Burbing()
 
-    if not args.names:
-        parser.print_help()
-        return 1
+    # Convert buffer from meters to degrees (approximately)
+    buffer_degrees = args.buffer / 111000  # 1 degree ≈ 111km
+    logger.info(f"Using buffer size: {args.buffer}m ({buffer_degrees:.6f} degrees)")
 
     if args.shapefile:
         filename, key = args.shapefile.split(',')
         shapefile = burbing.data_loader.load_shapefile(filename)
-        for name in args.names:
-            polygon = burbing.data_loader.get_shapefile_polygon(shapefile, key, name)
-            burbing.add_polygon(polygon, name)
+        polygon = burbing.data_loader.get_shapefile_polygon(shapefile, key, args.location)
+        burbing.add_polygon(polygon, args.location)
     else:
-        for name in args.names:
-            polygon = burbing.data_loader.load_osm_data(name, args.select, args.buffer)
-            burbing.add_polygon(polygon, name)
+        polygon = burbing.data_loader.load_osm_data(args.location, args.select, buffer_degrees)
+        burbing.add_polygon(polygon, args.location)
 
     if args.start:
         burbing.set_start_location(args.start)

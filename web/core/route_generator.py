@@ -26,30 +26,10 @@ class RouteGenerator:
         self.geometry = geometry_manager
         self.euler_circuit = None
 
-    def filter_completed_roads(self, graph, completed_area):
-        """
-        Filter out completed roads from the graph while maintaining balance.
-        
-        Args:
-            graph (nx.DiGraph): The graph to filter
-            completed_area (shapely.geometry.Polygon): The area of completed roads
-            
-        Returns:
-            nx.DiGraph: The filtered graph
-        """
-        if not completed_area:
-            logger.warning("No completed area provided - skipping filtering")
-            return graph
-
+    def filter_completed_roads(self, graph, completed_buffer):
+        """Filter out completed roads from the graph."""
         logger.info("=== Starting completed roads filtering ===")
         
-        # Create a buffer around the completed area (15 meters)
-        completed_buffer = completed_area.buffer(0.00015)  # ~15 meter buffer
-        if completed_buffer.is_empty:
-            logger.error("Completed area buffer is empty - no filtering will be done")
-            return graph
-
-        # First pass: identify completed and uncompleted edges
         total_edges = graph.number_of_edges()
         edges_with_geometry = 0
         edges_intersecting = 0
@@ -84,6 +64,8 @@ class RouteGenerator:
                     u_coords = (graph.nodes[u]['x'], graph.nodes[u]['y'])
                     v_coords = (graph.nodes[v]['x'], graph.nodes[v]['y'])
                     edge_geom = shapely.geometry.LineString([u_coords, v_coords])
+                    data['geometry'] = edge_geom
+                    data['is_straight_line'] = True  # Mark as straight line
                 except (KeyError, AttributeError) as e:
                     logger.error(f"Cannot create geometry for edge {u}-{v}: {str(e)}")
                     continue
@@ -104,8 +86,8 @@ class RouteGenerator:
                 edge_area = edge_buffer.area if edge_buffer.area > 0 else 1e-10
                 overlap_ratio = intersection_area / edge_area
                 
-                # If more than 70% completed
-                if overlap_ratio > 0.7:
+                # Lower the overlap threshold to 50% to be more aggressive about marking roads as completed
+                if overlap_ratio > 0.5:  # Changed from 0.7 to 0.5
                     high_overlap_edges += 1
                     edge_pair = frozenset([u, v])
                     
@@ -117,7 +99,7 @@ class RouteGenerator:
                         rev_intersection = rev_buffer.intersection(completed_buffer)
                         rev_overlap = rev_intersection.area / rev_buffer.area if rev_buffer.area > 0 else 0
                         
-                        if rev_overlap > 0.7:
+                        if rev_overlap > 0.5:  # Changed from 0.7 to 0.5
                             # Both directions are completed
                             completed_pairs[edge_pair] = ((u, v), (v, u))
                         else:
@@ -133,11 +115,6 @@ class RouteGenerator:
                     uncompleted_edges.add((u, v))
                     nodes_with_uncompleted.add(u)
                     nodes_with_uncompleted.add(v)
-            else:
-                # Edge is not completed, add it to uncompleted edges
-                uncompleted_edges.add((u, v))
-                nodes_with_uncompleted.add(u)
-                nodes_with_uncompleted.add(v)
                 
                 # If there's a reverse edge, check if it's completed
                 if graph.has_edge(v, u):
@@ -151,14 +128,14 @@ class RouteGenerator:
                         # Check if reverse edge is completed
                         rev_intersection = rev_buffer.intersection(completed_buffer)
                         rev_overlap = rev_intersection.area / rev_buffer.area if rev_buffer.area > 0 else 0
-                        if rev_overlap <= 0.7:
+                        if rev_overlap <= 0.5:  # Changed from 0.7 to 0.5
                             uncompleted_edges.add((v, u))
 
         logger.info(f"Edge analysis:")
         logger.info(f"  - Total edges: {total_edges}")
         logger.info(f"  - Edges with geometry: {edges_with_geometry}")
         logger.info(f"  - Edges intersecting completed area: {edges_intersecting}")
-        logger.info(f"  - Edges with high overlap (>70%): {high_overlap_edges}")
+        logger.info(f"  - Edges with high overlap (>50%): {high_overlap_edges}")
         logger.info(f"  - Completed edge pairs: {len(completed_pairs)}")
         logger.info(f"  - Uncompleted edges to preserve: {len(uncompleted_edges)}")
         logger.info(f"  - Nodes with uncompleted edges: {len(nodes_with_uncompleted)}")
@@ -173,133 +150,96 @@ class RouteGenerator:
         uncompleted_components = list(nx.weakly_connected_components(uncompleted_graph))
         logger.info(f"Found {len(uncompleted_components)} regions of uncompleted edges")
         
-        # Create filtered graph starting with uncompleted edges
-        filtered_graph = nx.DiGraph()
+        # Sort components by size (number of nodes) in descending order
+        uncompleted_components.sort(key=len, reverse=True)
         
-        # Add all uncompleted edges first
-        for u, v in uncompleted_edges:
-            edge_data = copy_edge_data(graph.get_edge_data(u, v))
-            filtered_graph.add_edge(u, v, **edge_data)
+        # Start with the largest component
+        largest_component = uncompleted_components[0]
+        filtered_graph = uncompleted_graph.subgraph(largest_component).copy()
+        logger.info(f"Starting with largest component containing {len(largest_component)} nodes")
         
-        # For each component, ensure it's internally balanced first
-        for component in uncompleted_components:
-            component_nodes = list(component)
-            for node in component_nodes:
-                in_degree = filtered_graph.in_degree(node)
-                out_degree = filtered_graph.out_degree(node)
-                if in_degree != out_degree:
-                    # Try to find balancing edges within the same component
-                    for other_node in component_nodes:
-                        if node != other_node:
-                            if in_degree < out_degree and filtered_graph.has_edge(other_node, node):
-                                # Need incoming edge, copy the reverse of existing edge
-                                edge_data = copy_edge_data(graph.get_edge_data(other_node, node))
-                                if 'geometry' in edge_data:
-                                    # Reverse the geometry for the opposite direction
-                                    coords = list(edge_data['geometry'].coords)
-                                    edge_data['geometry'] = shapely.geometry.LineString(coords[::-1])
-                                filtered_graph.add_edge(other_node, node, **edge_data)
-                                in_degree += 1
-                            elif in_degree > out_degree and filtered_graph.has_edge(node, other_node):
-                                # Need outgoing edge, copy existing edge
-                                edge_data = copy_edge_data(graph.get_edge_data(node, other_node))
-                                filtered_graph.add_edge(node, other_node, **edge_data)
-                                out_degree += 1
+        # Try to connect other components to the largest one
+        for i in range(1, len(uncompleted_components)):
+            component = uncompleted_components[i]
+            component_size = len(component)
+            logger.info(f"Attempting to connect component {i} with {component_size} nodes")
+            
+            # Find best connection between current component and filtered graph
+            best_path = None
+            min_completed_edges = float('inf')
+            best_source = None
+            best_target = None
+            best_reverse_path = None
+            
+            for source in component:
+                for target in filtered_graph.nodes():
+                    if source != target:
+                        try:
+                            # Try to find a path through the original graph
+                            forward_path = nx.shortest_path(graph, source, target, weight='length')
+                            forward_completed = sum(1 for j in range(len(forward_path)-1) 
+                                               if frozenset([forward_path[j], forward_path[j+1]]) in completed_pairs)
                             
-                            if in_degree == out_degree:
-                                break
-        
-        # Now connect components using uncompleted roads first, then completed roads if necessary
-        if len(uncompleted_components) > 1:
-            for i in range(len(uncompleted_components)):
-                for j in range(i + 1, len(uncompleted_components)):
-                    comp1 = uncompleted_components[i]
-                    comp2 = uncompleted_components[j]
-                    
-                    # Try to find a path using only uncompleted roads first
-                    path_found = False
-                    min_path_length = float('inf')
-                    best_path = None
-                    best_source = None
-                    best_target = None
-                    
-                    for source in comp1:
-                        for target in comp2:
+                            # Try to find a reverse path to maintain balance
                             try:
-                                # Look for paths in the uncompleted graph
-                                if nx.has_path(uncompleted_graph, source, target):
-                                    path = nx.shortest_path(uncompleted_graph, source, target, weight='length')
-                                    path_length = sum(uncompleted_graph[path[k]][path[k+1]].get('length', 1) 
-                                                    for k in range(len(path)-1))
-                                    
-                                    if path_length < min_path_length:
-                                        min_path_length = path_length
-                                        best_path = path
-                                        best_source = source
-                                        best_target = target
-                                        path_found = True
-                            except Exception:
+                                reverse_path = nx.shortest_path(graph, target, source, weight='length')
+                                reverse_completed = sum(1 for j in range(len(reverse_path)-1)
+                                                   if frozenset([reverse_path[j], reverse_path[j+1]]) in completed_pairs)
+                                
+                                # Only consider this pair if we can find both forward and reverse paths
+                                total_completed = forward_completed + reverse_completed
+                                if total_completed < min_completed_edges:
+                                    min_completed_edges = total_completed
+                                    best_path = forward_path
+                                    best_reverse_path = reverse_path
+                                    best_source = source
+                                    best_target = target
+                            except nx.NetworkXNoPath:
                                 continue
-                    
-                    if path_found and best_path:
-                        # Add the uncompleted road path
-                        for k in range(len(best_path) - 1):
-                            u, v = best_path[k], best_path[k + 1]
-                            if not filtered_graph.has_edge(u, v):
-                                edge_data = copy_edge_data(uncompleted_graph.get_edge_data(u, v))
-                                filtered_graph.add_edge(u, v, **edge_data)
-                        logger.info(f"Connected components using uncompleted road path: {best_source}->{best_target}")
-                        continue
-                    
-                    # If no uncompleted path exists, try using completed roads
-                    min_path_length = float('inf')
-                    best_path = None
-                    best_source = None
-                    best_target = None
-                    
-                    for source in comp1:
-                        for target in comp2:
-                            try:
-                                # Try to find a path through completed roads
-                                paths = list(nx.all_simple_paths(graph, source, target, cutoff=5))
-                                for path in paths:
-                                    path_length = 0
-                                    path_valid = True
-                                    completed_road_count = 0
-                                    
-                                    for k in range(len(path) - 1):
-                                        u, v = path[k], path[k + 1]
-                                        edge_pair = frozenset([u, v])
-                                        if edge_pair in completed_pairs:
-                                            completed_road_count += 1
-                                        path_length += graph[u][v].get('length', 1)
-                                    
-                                    # Prefer paths with fewer completed roads
-                                    path_score = path_length * (1 + completed_road_count)
-                                    if path_score < min_path_length:
-                                        min_path_length = path_score
-                                        best_path = path
-                                        best_source = source
-                                        best_target = target
-                            except Exception:
-                                continue
-                    
-                    if best_path:
-                        # Add the path, preferring uncompleted roads when available
-                        for k in range(len(best_path) - 1):
-                            u, v = best_path[k], best_path[k + 1]
-                            if not filtered_graph.has_edge(u, v):
-                                edge_data = copy_edge_data(graph.get_edge_data(u, v))
-                                filtered_graph.add_edge(u, v, **edge_data)
-                                # Add reverse edge to maintain balance
-                                if graph.has_edge(v, u):
-                                    edge_data = copy_edge_data(graph.get_edge_data(v, u))
-                                    filtered_graph.add_edge(v, u, **edge_data)
-                        logger.info(f"Connected components using mixed road path: {best_source}->{best_target}")
-                    else:
-                        logger.warning(f"Could not find path between components {i} and {j}")
+                        except nx.NetworkXNoPath:
+                            continue
+            
+            if best_path and best_reverse_path:
+                # Add both forward and reverse paths to maintain balance
+                for path in [best_path, best_reverse_path]:
+                    for j in range(len(path)-1):
+                        u, v = path[j], path[j+1]
+                        if not filtered_graph.has_edge(u, v):
+                            edge_data = copy_edge_data(graph.get_edge_data(u, v))
+                            filtered_graph.add_edge(u, v, **edge_data)
+                
+                # Add all edges from the component
+                component_edges = list(uncompleted_graph.subgraph(component).edges())
+                for u, v in component_edges:
+                    if not filtered_graph.has_edge(u, v):
+                        edge_data = copy_edge_data(uncompleted_graph.get_edge_data(u, v))
+                        filtered_graph.add_edge(u, v, **edge_data)
+                    # Add reverse edge if it exists in the original graph
+                    if graph.has_edge(v, u) and not filtered_graph.has_edge(v, u):
+                        rev_data = copy_edge_data(graph.get_edge_data(v, u))
+                        filtered_graph.add_edge(v, u, **rev_data)
+                
+                logger.info(f"Connected component {i} using balanced paths between {best_source} and {best_target}")
+            else:
+                logger.warning(f"Could not find balanced connection for component {i}")
+                # Try to add the component as a separate circuit
+                component_graph = uncompleted_graph.subgraph(component).copy()
+                if nx.is_weakly_connected(component_graph):
+                    # Balance the component internally
+                    for u, v in component_graph.edges():
+                        if not filtered_graph.has_edge(u, v):
+                            edge_data = copy_edge_data(uncompleted_graph.get_edge_data(u, v))
+                            filtered_graph.add_edge(u, v, **edge_data)
+                        # Add reverse edge if needed for balance
+                        if not filtered_graph.has_edge(v, u):
+                            if graph.has_edge(v, u):
+                                rev_data = copy_edge_data(graph.get_edge_data(v, u))
+                            else:
+                                rev_data = copy_edge_data(uncompleted_graph.get_edge_data(u, v))
+                            filtered_graph.add_edge(v, u, **rev_data)
+                    logger.info(f"Added component {i} as separate balanced circuit")
         
-        # Final balance check
+        # Balance the filtered graph
         unbalanced_nodes = []
         for node in filtered_graph.nodes():
             in_degree = filtered_graph.in_degree(node)
@@ -308,78 +248,89 @@ class RouteGenerator:
                 unbalanced_nodes.append((node, in_degree, out_degree))
         
         if unbalanced_nodes:
-            logger.error(f"Graph is still unbalanced after connecting components. Found {len(unbalanced_nodes)} unbalanced nodes")
-            # Try to balance each component separately
-            components = list(nx.weakly_connected_components(filtered_graph))
-            logger.info(f"Attempting to balance {len(components)} components separately")
+            logger.info(f"Attempting to balance {len(unbalanced_nodes)} nodes")
+            needs_in = [(node, out_deg - in_deg) for node, in_deg, out_deg in unbalanced_nodes if in_deg < out_deg]
+            needs_out = [(node, in_deg - out_deg) for node, in_deg, out_deg in unbalanced_nodes if in_deg > out_deg]
             
-            for i, component in enumerate(components):
-                subgraph = filtered_graph.subgraph(component).copy()
-                needs_in = []
-                needs_out = []
-                
-                # Find imbalanced nodes in this component
-                for node in subgraph.nodes():
-                    in_deg = subgraph.in_degree(node)
-                    out_deg = subgraph.out_degree(node)
-                    if in_deg < out_deg:
-                        needs_in.extend([(node, out_deg - in_deg)])
-                    elif in_deg > out_deg:
-                        needs_out.extend([(node, in_deg - out_deg)])
-                
-                # Try to balance within component
-                if needs_in and needs_out:
-                    logger.info(f"Component {i}: {len(needs_in)} nodes need in, {len(needs_out)} need out")
-                    for target_node, needed in needs_in:
-                        for source_node, available in needs_out:
-                            if needed > 0 and available > 0:
-                                try:
-                                    # Try to find a path through uncompleted roads first
-                                    path = nx.shortest_path(subgraph, source_node, target_node)
-                                    edge_data = copy_edge_data(graph.get_edge_data(path[0], path[1]))
-                                    filtered_graph.add_edge(source_node, target_node, **edge_data)
-                                    needed -= 1
-                                    available -= 1
-                                except nx.NetworkXNoPath:
-                                    continue
-            
-            # Check if we managed to balance the components
-            still_unbalanced = []
-            for node in filtered_graph.nodes():
-                in_deg = filtered_graph.in_degree(node)
-                out_deg = filtered_graph.out_degree(node)
-                if in_deg != out_deg:
-                    still_unbalanced.append((node, in_deg, out_deg))
-            
-            if still_unbalanced:
-                logger.error(f"Could not balance components. {len(still_unbalanced)} nodes remain unbalanced")
-                return graph
+            # Try to balance nodes using shortest paths and their reverses
+            for (target, needed) in needs_in:
+                for (source, available) in needs_out:
+                    if needed > 0 and available > 0:
+                        try:
+                            # Find forward path
+                            forward_path = nx.shortest_path(graph, source, target, weight='length')
+                            # Find reverse path
+                            reverse_path = nx.shortest_path(graph, target, source, weight='length')
+                            
+                            # Add both paths to maintain balance
+                            for path in [forward_path, reverse_path]:
+                                for i in range(len(path)-1):
+                                    u, v = path[i], path[i+1]
+                                    if not filtered_graph.has_edge(u, v):
+                                        edge_data = copy_edge_data(graph.get_edge_data(u, v))
+                                        filtered_graph.add_edge(u, v, **edge_data)
+                            
+                            needed -= 1
+                            available -= 1
+                            if needed == 0 or available == 0:
+                                break
+                        except nx.NetworkXNoPath:
+                            continue
         
-        # Verify connectivity - but don't revert if disconnected
+        # Final check for balance
+        still_unbalanced = []
+        for node in filtered_graph.nodes():
+            in_deg = filtered_graph.in_degree(node)
+            out_deg = filtered_graph.out_degree(node)
+            if in_deg != out_deg:
+                still_unbalanced.append((node, in_deg, out_deg))
+        
+        if still_unbalanced:
+            logger.warning(f"{len(still_unbalanced)} nodes remain unbalanced")
+            # Add reverse edges for all edges to force balance
+            edges_to_add = []
+            for u, v in filtered_graph.edges():
+                if not filtered_graph.has_edge(v, u):
+                    edges_to_add.append((v, u))
+            
+            for v, u in edges_to_add:
+                if graph.has_edge(v, u):
+                    edge_data = copy_edge_data(graph.get_edge_data(v, u))
+                else:
+                    # Create reverse edge data from forward edge
+                    edge_data = copy_edge_data(filtered_graph.get_edge_data(u, v))
+                    if 'geometry' in edge_data:
+                        # Reverse the geometry
+                        coords = list(edge_data['geometry'].coords)
+                        edge_data['geometry'] = shapely.geometry.LineString(coords[::-1])
+                filtered_graph.add_edge(v, u, **edge_data)
+            
+            logger.info("Added reverse edges to force graph balance")
+        
+        # Verify the graph is weakly connected
         if not nx.is_weakly_connected(filtered_graph):
             components = list(nx.weakly_connected_components(filtered_graph))
-            logger.warning(f"Graph has {len(components)} disconnected components")
+            logger.warning(f"Final graph has {len(components)} disconnected components")
+            # Use the largest component
+            largest = max(components, key=len)
+            filtered_graph = filtered_graph.subgraph(largest).copy()
+            # Ensure the largest component is balanced by adding reverse edges
+            edges_to_add = []
+            for u, v in filtered_graph.edges():
+                if not filtered_graph.has_edge(v, u):
+                    edges_to_add.append((v, u))
             
-            # Find the largest component
-            largest_component = max(components, key=len)
-            logger.info(f"Using largest component with {len(largest_component)} nodes")
+            for v, u in edges_to_add:
+                if graph.has_edge(v, u):
+                    edge_data = copy_edge_data(graph.get_edge_data(v, u))
+                else:
+                    edge_data = copy_edge_data(filtered_graph.get_edge_data(u, v))
+                    if 'geometry' in edge_data:
+                        coords = list(edge_data['geometry'].coords)
+                        edge_data['geometry'] = shapely.geometry.LineString(coords[::-1])
+                filtered_graph.add_edge(v, u, **edge_data)
             
-            # Create a new graph with just the largest component
-            largest_graph = filtered_graph.subgraph(largest_component).copy()
-            
-            # Verify the largest component is balanced
-            unbalanced = False
-            for node in largest_graph.nodes():
-                if largest_graph.in_degree(node) != largest_graph.out_degree(node):
-                    unbalanced = True
-                    break
-            
-            if unbalanced:
-                logger.error("Largest component is not balanced, reverting to original graph")
-                return graph
-            
-            filtered_graph = largest_graph
-            logger.info(f"Proceeding with largest balanced component")
+            logger.info(f"Using balanced largest component with {len(largest)} nodes")
         
         edges_removed = total_edges - filtered_graph.number_of_edges()
         logger.info(f"Successfully removed {edges_removed} completed road segments")
@@ -471,9 +422,25 @@ class RouteGenerator:
         stats_distance = 0.0
         stats_backtrack = 0.0
         total_direction_markers = 0
+        straight_line_edges = 0
 
         logger.info('Creating GPX track with direction indicators')
         logger.info(f'Number of edges to process: {len(edges)}')
+
+        # Log all straight line edges at start
+        logger.debug("Straight line edges in route:")
+        for u, v in edges:
+            edge_data = graph.get_edge_data(u, v)
+            if edge_data and edge_data.get('is_straight_line', False):
+                u_info = graph.nodes[u]
+                v_info = graph.nodes[v]
+                straight_line_edges += 1
+                logger.debug(f"STRAIGHT_LINE: {u}->{v}")
+                logger.debug(f"  From: {u_info.get('name', 'unnamed')} at ({u_info.get('x', '?'):.6f}, {u_info.get('y', '?'):.6f})")
+                logger.debug(f"  To: {v_info.get('name', 'unnamed')} at ({v_info.get('x', '?'):.6f}, {v_info.get('y', '?'):.6f})")
+                logger.debug(f"  Edge attributes: {edge_data}")
+
+        logger.info(f"Route contains {straight_line_edges} straight line edges out of {len(edges)} total edges")
 
         gpx = gpxpy.gpx.GPX()
         gpx.name = f'optiburb_route'
@@ -505,17 +472,28 @@ class RouteGenerator:
                 try:
                     u_coords = (graph.nodes[u]['x'], graph.nodes[u]['y'])
                     v_coords = (graph.nodes[v]['x'], graph.nodes[v]['y'])
-                    markers_added = self._add_track_points(segment, [u_coords, v_coords], i, arrow_interval)
-                    if markers_added is not None:
-                        total_direction_markers += markers_added
-                    i += 2
+                    edge_data = {
+                        'geometry': shapely.geometry.LineString([u_coords, v_coords]), 
+                        'is_straight_line': True,
+                        'length': self.geometry.calculate_distance(u_coords, v_coords)
+                    }
+                    logger.debug(f"STRAIGHT_LINE: Created new straight line for null edge {u}->{v}")
+                    logger.debug(f"  From: ({u_coords[0]:.6f}, {u_coords[1]:.6f})")
+                    logger.debug(f"  To: ({v_coords[0]:.6f}, {v_coords[1]:.6f})")
+                    logger.debug(f"  Edge attributes: {edge_data}")
                 except (KeyError, AttributeError) as e:
                     logger.error(f"Cannot create straight line for edge {edge}: {str(e)}")
-                continue
+                    continue
 
             linestring = edge_data.get('geometry')
             augmented = edge_data.get('augmented')
-            stats_distance += edge_data.get('length', 0)
+            is_straight_line = edge_data.get('is_straight_line', False)
+            
+            # Only add to distance if not a straight line
+            if not is_straight_line:
+                stats_distance += edge_data.get('length', 0)
+            else:
+                logger.debug(f"STRAIGHT_LINE: Excluding distance for straight line edge {u}->{v}")
 
             logger.debug(' leg [%d] -> %s (%s,%s,%s,%s,%s)', n, edge_data.get('name', ''), 
                         edge_data.get('highway', ''), edge_data.get('surface', ''), 
@@ -546,7 +524,12 @@ class RouteGenerator:
                     u_coords = (graph.nodes[u]['x'], graph.nodes[u]['y'])
                     v_coords = (graph.nodes[v]['x'], graph.nodes[v]['y'])
                     coords_to_use = [u_coords, v_coords]
-                    logger.debug(f"Using straight line for edge {edge}")
+                    edge_data['is_straight_line'] = True
+                    edge_data['length'] = self.geometry.calculate_distance(u_coords, v_coords)
+                    logger.debug(f"STRAIGHT_LINE: Created straight line for missing coords {u}->{v}")
+                    logger.debug(f"  From: ({u_coords[0]:.6f}, {u_coords[1]:.6f})")
+                    logger.debug(f"  To: ({v_coords[0]:.6f}, {v_coords[1]:.6f})")
+                    logger.debug(f"  Edge attributes: {edge_data}")
                 except (KeyError, AttributeError) as e:
                     logger.error(f"Cannot create straight line for edge {edge}: {str(e)}")
                     continue
@@ -555,9 +538,32 @@ class RouteGenerator:
                 logger.error(f"No valid coordinates found for edge {edge}")
                 continue
 
-            markers_added = self._add_track_points(segment, coords_to_use, i, arrow_interval)
-            if markers_added is not None:
-                total_direction_markers += markers_added
+            # Add points to the track segment
+            for j, coord in enumerate(coords_to_use):
+                point = gpxpy.gpx.GPXTrackPoint(coord[1], coord[0])
+                
+                # Add type attribute for straight lines
+                if is_straight_line:
+                    point.type = 'straight_line'
+                
+                segment.points.append(point)
+                
+                # Add direction markers only for real roads
+                if not is_straight_line and j > 0 and j < len(coords_to_use) and (i + j) % arrow_interval == 0:
+                    # Create direction marker point
+                    marker = gpxpy.gpx.GPXTrackPoint(coord[1], coord[0])
+                    marker.type = 'direction'
+                    
+                    # Calculate bearing from previous point
+                    prev_coord = coords_to_use[j-1]
+                    bearing = self.geometry.calculate_bearing(
+                        prev_coord[1], prev_coord[0],
+                        coord[1], coord[0]
+                    )
+                    marker.comment = str(bearing)
+                    segment.points.append(marker)
+                    total_direction_markers += 1
+
             i += len(coords_to_use)
 
             if edge_data.get('augmented', False):

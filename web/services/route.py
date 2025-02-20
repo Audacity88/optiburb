@@ -230,6 +230,7 @@ class RouteService:
                 for segment in track.segments:
                     route_coords = []
                     prev_point = None
+                    is_straight_line = False
                     
                     for point in segment.points:
                         # Update bounds
@@ -240,6 +241,10 @@ class RouteService:
                         
                         # Add point to route coordinates
                         route_coords.append([point.longitude, point.latitude])
+                        
+                        # Check if this is a straight line segment
+                        if hasattr(point, 'type') and point.type == 'straight_line':
+                            is_straight_line = True
                         
                         # Check if this is a direction marker
                         if hasattr(point, 'type') and point.type == 'direction' and prev_point:
@@ -273,7 +278,7 @@ class RouteService:
                                 "coordinates": route_coords
                             },
                             "properties": {
-                                "type": "route"
+                                "type": "straight_line" if is_straight_line else "route"
                             }
                         })
             

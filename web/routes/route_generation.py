@@ -12,6 +12,8 @@ import os
 from shapely.geometry import LineString
 import gpxpy
 from optiburb import Burbing
+import datetime
+from optiburb import Burbing
 
 routes = Blueprint('routes', __name__)
 
@@ -417,5 +419,41 @@ def get_segments():
         
     except Exception as e:
         logger.error(f"Error processing segments: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@routes.route('/upload', methods=['POST'])
+def upload_gpx():
+    """Handle GPX file upload."""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+    
+    if not file.filename.endswith('.gpx'):
+        return jsonify({'error': 'Only GPX files are allowed'}), 400
+    
+    try:
+        # Parse GPX file to validate it
+        gpx = gpxpy.parse(file)
+        
+        # Generate unique filename
+        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f'uploaded_route_{timestamp}.gpx'
+        filepath = os.path.join(settings.UPLOAD_FOLDER, filename)
+        
+        # Save file
+        file.seek(0)
+        file.save(filepath)
+        
+        return jsonify({
+            'success': True,
+            'message': 'File uploaded successfully',
+            'gpx_file': filename
+        })
+        
+    except Exception as e:
+        logger.error(f"Error processing uploaded GPX: {str(e)}")
         return jsonify({'error': str(e)}), 500
 

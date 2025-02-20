@@ -51,7 +51,7 @@ class DataLoader:
         Args:
             location (str): Location name or description
             select (int): Which result to use from geocoding (default: 1)
-            buffer_dist (float): Buffer distance in degrees around the point (default: 20)
+            buffer_dist (float): Buffer distance in degrees around the point
             
         Returns:
             shapely.geometry.Polygon: The polygon representing the area
