@@ -176,16 +176,11 @@ function displayRoute(filename, startCoordinates = null) {
             );
 
             // Finally get regular route features (excluding straight lines and directions)
-            const regularRouteFeatures = data.geojson.features.filter(f => {
-                // Skip if no properties
-                if (!f.properties) return false;
-                
-                // Skip if it's a straight line or direction
-                if (f.properties.type === 'straight_line' || f.properties.type === 'direction') return false;
-                
-                // Include only if it's a route or has no type specified
-                return f.properties.type === 'route' || !f.properties.type;
-            });
+            const regularRouteFeatures = data.geojson.features.filter(f => 
+                (!f.properties || !f.properties.type || f.properties.type === 'route') &&
+                (!f.properties || f.properties.type !== 'straight_line') &&
+                (!f.properties || f.properties.type !== 'direction')
+            );
             
             // Log feature counts
             console.debug('Feature counts:');
@@ -207,7 +202,6 @@ function displayRoute(filename, startCoordinates = null) {
             // Add original route to base route layer
             baseRouteLayer.clearLayers();
             straightLinesLayer.clearLayers();
-            routeLayer.clearLayers();  // Clear route layer as well
             
             // First add the regular route lines
             const baseRoute = L.geoJSON({
@@ -220,7 +214,7 @@ function displayRoute(filename, startCoordinates = null) {
                     opacity: 0.8,
                     pane: 'baseRoutePane'
                 }
-            }).addTo(baseRouteLayer);  // Add to baseRouteLayer, not routeLayer
+            }).addTo(baseRouteLayer);
 
             // Add straight line segments to their own layer
             const straightLines = L.geoJSON({
@@ -236,8 +230,15 @@ function displayRoute(filename, startCoordinates = null) {
                 }
             }).addTo(straightLinesLayer);
             
-            // Make sure base route layer is visible
-            baseRouteLayer.addTo(map);
+            // Log the number of straight line segments
+            const straightLineCount = straightLines.getLayers().length;
+            console.log(`Added ${straightLineCount} straight line segments to the map`);
+
+            // Add straight lines layer to the map if there are straight line segments
+            if (straightLineCount > 0) {
+                map.addLayer(straightLinesLayer);
+                map.removeLayer(straightLinesLayer);  // Add but hide by default
+            }
             
             // Log the number of layers added
             console.log(`Added ${baseRoute.getLayers().length} layers to the map`);
@@ -415,6 +416,7 @@ function displayRoute(filename, startCoordinates = null) {
                         segmentsLayer.clearLayers();
                         straightLinesLayer.clearLayers();
                         baseRouteLayer.clearLayers();
+                        routeLayer.clearLayers();  // Clear route layer as well
 
                         // First process straight line segments
                         straightLineSegments.forEach(segment => {
@@ -432,78 +434,37 @@ function displayRoute(filename, startCoordinates = null) {
                             line.addTo(straightLinesLayer);
                         });
 
-                        // Then process incomplete segments (excluding straight lines)
-                        completionData.incomplete_segments.forEach(segment => {
-                            if (!segment.coordinates || segment.coordinates.length < 2 || segment.is_straight_line) return;
-                            
-                            // Skip if it's part of a straight line
-                            if (isPartOfStraightLine(segment.coordinates)) return;
-                            
-                            // Fix coordinate order: Convert from [lng, lat] to [lat, lng]
-                            const correctedCoords = segment.coordinates.map(coord => [coord[1], coord[0]]);
-                            
-                            const line = L.polyline(correctedCoords, {
-                                color: '#ef4444',  // red for incomplete segments
-                                weight: 5,
-                                opacity: 1.0,
-                                pane: 'segmentsPane',
-                                interactive: true
-                            });
-                            line.addTo(segmentsLayer);
-                        });
-                        
-                        // Finally process complete segments (excluding straight lines)
-                        completionData.completed_segments.forEach(segment => {
-                            if (!segment.coordinates || segment.coordinates.length < 2 || segment.is_straight_line) return;
-                            
-                            // Skip if it's part of a straight line
-                            if (isPartOfStraightLine(segment.coordinates)) return;
-                            
-                            // Fix coordinate order: Convert from [lng, lat] to [lat, lng]
-                            const correctedCoords = segment.coordinates.map(coord => [coord[1], coord[0]]);
-                            
-                            const line = L.polyline(correctedCoords, {
-                                color: '#22c55e',  // green for completed segments
-                                weight: 5,
-                                opacity: 1.0,
-                                pane: 'segmentsPane',
-                                interactive: true
-                            });
-                            line.addTo(segmentsLayer);
-                        });
-
-                        // Add remaining route segments to base route layer (excluding straight lines)
-                        const allSegmentCoords = new Set();
+                        // Process all non-straight-line segments for both Completed and Route layers
                         [...completionData.incomplete_segments, ...completionData.completed_segments].forEach(segment => {
-                            if (!segment.coordinates) return;
-                            segment.coordinates.forEach(coord => allSegmentCoords.add(JSON.stringify(coord)));
-                        });
-
-                        // Filter regular route features to exclude straight lines and segments
-                        const remainingRouteFeatures = regularRouteFeatures.filter(feature => {
-                            if (!feature.geometry || !feature.geometry.coordinates) return false;
-                            // Skip if it's a straight line
-                            if (feature.properties && feature.properties.type === 'straight_line') return false;
+                            if (!segment.coordinates || segment.coordinates.length < 2 || segment.is_straight_line) return;
+                            
                             // Skip if it's part of a straight line
-                            if (isPartOfStraightLine(feature.geometry.coordinates)) return false;
-                            // Skip if all coordinates are part of segments
-                            return !feature.geometry.coordinates.every(coord => 
-                                allSegmentCoords.has(JSON.stringify(coord))
-                            );
-                        });
-
-                        // Add remaining route features to base route layer
-                        L.geoJSON({
-                            type: "FeatureCollection",
-                            features: remainingRouteFeatures
-                        }, {
-                            style: {
-                                color: '#0000ff',  // blue color
+                            if (isPartOfStraightLine(segment.coordinates)) return;
+                            
+                            // Fix coordinate order: Convert from [lng, lat] to [lat, lng]
+                            const correctedCoords = segment.coordinates.map(coord => [coord[1], coord[0]]);
+                            
+                            // Add to Route layer in blue
+                            const routeLine = L.polyline(correctedCoords, {
+                                color: '#0000ff',  // blue for route segments
                                 weight: 3,
                                 opacity: 0.8,
-                                pane: 'baseRoutePane'
-                            }
-                        }).addTo(baseRouteLayer);
+                                pane: 'routePane',
+                                interactive: true
+                            });
+                            routeLine.addTo(routeLayer);
+                            
+                            // Add to Completed layer with appropriate color
+                            const isComplete = completionData.completed_segments.includes(segment);
+                            const completedLine = L.polyline(correctedCoords, {
+                                color: isComplete ? '#22c55e' : '#ef4444',  // green for completed, red for incomplete
+                                weight: 5,
+                                opacity: 1.0,
+                                pane: 'segmentsPane',
+                                interactive: true
+                            });
+                            completedLine.addTo(segmentsLayer);
+                        });
 
                         // Re-add direction ticks to the directions layer
                         directionTicks.forEach(tick => {
@@ -524,7 +485,6 @@ function displayRoute(filename, startCoordinates = null) {
                         routeLayer.addTo(map);
                         segmentsLayer.addTo(map);
                         directionsLayer.addTo(map);
-                        // Don't add straightLinesLayer - it will be controlled by the layer control
 
                         // Force map update and redraw
                         map.invalidateSize();
