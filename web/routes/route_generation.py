@@ -75,8 +75,38 @@ def generate_route():
         logger.info(f"Using buffer size: {buffer_meters}m ({buffer_degrees:.6f} degrees)")
         
         burbing = Burbing()
-        polygon = burbing.data_loader.load_osm_data(location, select=1, buffer_dist=buffer_degrees)
-        burbing.add_polygon(polygon, location)
+        existing_burbing = hasattr(burbing, 'polygons') and burbing.polygons
+        
+        # Only get polygon and add it if we don't have an existing instance
+        if not existing_burbing:
+            polygon = burbing.data_loader.load_osm_data(location, select=1, buffer_dist=buffer_degrees)
+            if not polygon:
+                progress_queue.put(json.dumps({
+                    'type': 'progress',
+                    'message': 'Failed to get OSM polygon'
+                }))
+                return None, "Failed to get OSM polygon"
+            
+            burbing.add_polygon(polygon, location)
+            
+            # Validate polygon was added correctly
+            if not hasattr(burbing, 'polygons') or not burbing.polygons:
+                progress_queue.put(json.dumps({
+                    'type': 'progress',
+                    'message': 'Failed to initialize area polygon'
+                }))
+                return None, "Failed to initialize polygons"
+            
+            # Get the center coordinates of the polygon
+            center_lat, center_lng = polygon.centroid.y, polygon.centroid.x
+            
+            progress_queue.put(json.dumps({
+                'type': 'progress',
+                'step': 'Area defined',
+                'progress': 15,
+                'message': 'Successfully defined target area',
+                'coordinates': [center_lat, center_lng]
+            }))
         
         # Get bounds from the polygon
         minx, miny, maxx, maxy = polygon.bounds

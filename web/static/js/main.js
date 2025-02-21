@@ -1,3 +1,23 @@
+// Add styles for the start marker
+const style = document.createElement('style');
+style.textContent = `
+    .start-marker {
+        width: 16px !important;
+        height: 16px !important;
+        margin-left: -8px !important;
+        margin-top: -8px !important;
+    }
+    .start-marker div {
+        width: 16px;
+        height: 16px;
+        background-color: #22c55e;
+        border: 2px solid white;
+        border-radius: 50%;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+`;
+document.head.appendChild(style);
+
 // Global map variables
 let map = null;
 let routeLayer = null;
@@ -86,10 +106,15 @@ function displayRoute(filename) {
     const resultContent = document.getElementById('resultContent');
 
     // Clear any existing completion information
-    const existingCompletion = resultContent.querySelector('.bg-gray-50.border-gray-200');
+    const existingCompletion = document.querySelector('.completion-info');
     if (existingCompletion) {
         existingCompletion.remove();
     }
+
+    // Create a new div for completion info that will appear below the map
+    const completionInfo = document.createElement('div');
+    completionInfo.className = 'completion-info mt-4';
+    mapContainer.parentNode.insertBefore(completionInfo, mapContainer.nextSibling);
 
     // Show map container before initializing map
     mapContainer.classList.remove('hidden');
@@ -117,11 +142,14 @@ function displayRoute(filename) {
 
             // Initialize new map - this will clear all existing layers
             console.log('Initializing new map');
-            initMap(center);
+            // If we have start coordinates, use those for initial center
+            const mapCenter = data.start_coordinates || center;
+            console.log('Using map center:', mapCenter, 'Start coordinates:', data.start_coordinates);
+            initMap(mapCenter);
 
             // Add route lines first
-            console.log('All features:', data.geojson.features);
-            console.log('Features with straight_line type:', data.geojson.features.filter(f => f.properties && f.properties.type === 'straight_line'));
+            console.debug('All features:', data.geojson.features);
+            console.debug('Features with straight_line type:', data.geojson.features.filter(f => f.properties && f.properties.type === 'straight_line'));
             
             // First separate direction features
             const directionFeatures = data.geojson.features.filter(f => 
@@ -141,20 +169,20 @@ function displayRoute(filename) {
             );
             
             // Log feature counts
-            console.log('Feature counts:');
-            console.log(`  Regular routes: ${regularRouteFeatures.length}`);
-            console.log(`  Straight lines: ${straightLineFeatures.length}`);
-            console.log(`  Directions: ${directionFeatures.length}`);
+            console.debug('Feature counts:');
+            console.debug(`  Regular routes: ${regularRouteFeatures.length}`);
+            console.debug(`  Straight lines: ${straightLineFeatures.length}`);
+            console.debug(`  Directions: ${directionFeatures.length}`);
 
             // Log straight line segments specifically
-            console.log('Straight line features:', straightLineFeatures);
-            console.log(`Found ${straightLineFeatures.length} straight line segments:`);
+            console.debug('Straight line features:', straightLineFeatures);
+            console.debug(`Found ${straightLineFeatures.length} straight line segments:`);
             straightLineFeatures.forEach((feature, index) => {
                 const coords = feature.geometry.coordinates;
-                console.log(`Straight line segment ${index + 1}:`);
-                console.log(`  Start: (${coords[0][1]}, ${coords[0][0]})`);
-                console.log(`  End: (${coords[coords.length-1][1]}, ${coords[coords.length-1][0]})`);
-                console.log('  Properties:', feature.properties);
+                console.debug(`Straight line segment ${index + 1}:`);
+                console.debug(`  Start: (${coords[0][1]}, ${coords[0][0]})`);
+                console.debug(`  End: (${coords[coords.length-1][1]}, ${coords[coords.length-1][0]})`);
+                console.debug('  Properties:', feature.properties);
             });
 
             // Add original route to base route layer
@@ -254,6 +282,26 @@ function displayRoute(filename) {
 
             // Fit map to route bounds with padding
             console.log('Fitting map to bounds');
+            // If we have start coordinates, adjust bounds to include them
+            if (data.start_coordinates) {
+                console.log('Adjusting bounds to include start coordinates:', data.start_coordinates);
+                bounds.minLat = Math.min(bounds.minLat, data.start_coordinates[0]);
+                bounds.maxLat = Math.max(bounds.maxLat, data.start_coordinates[0]);
+                bounds.minLng = Math.min(bounds.minLng, data.start_coordinates[1]);
+                bounds.maxLng = Math.max(bounds.maxLng, data.start_coordinates[1]);
+                
+                // Add a marker for the start location
+                const startMarker = L.marker(data.start_coordinates, {
+                    title: 'Start Location',
+                    icon: L.divIcon({
+                        className: 'start-marker',
+                        html: '<div></div>'
+                    })
+                }).addTo(map);
+                
+                console.log('Updated bounds:', bounds);
+            }
+            
             map.fitBounds([
                 [bounds.minLat, bounds.minLng],
                 [bounds.maxLat, bounds.maxLng]
@@ -524,13 +572,13 @@ function displayRoute(filename) {
                     // Force a map update
                     map.invalidateSize();
 
-                    // Add completion status to the result content
+                    // Add completion status below the map
                     const completionPercentage = (completionData.total_completion * 100).toFixed(1);
                     const totalDistance = (completionData.total_distance * 111).toFixed(1);  // Convert to km (rough approximation)
                     const completedDistance = (completionData.completed_distance * 111).toFixed(1);
 
                     const completionHtml = `
-                        <div class="mt-4 bg-gray-50 border border-gray-200 rounded-md p-4">
+                        <div class="bg-gray-50 border border-gray-200 rounded-md p-4">
                             <h3 class="text-lg font-medium text-gray-900 mb-2">Route Completion</h3>
                             <div class="space-y-2">
                                 <div class="flex justify-between">
@@ -551,13 +599,13 @@ function displayRoute(filename) {
                             </div>
                         </div>
                     `;
-                    resultContent.insertAdjacentHTML('beforeend', completionHtml);
+                    completionInfo.innerHTML = completionHtml;
                 })
                 .catch(error => {
                     console.error('Error loading completion data:', error);
-                    // Add a message to the result content about needing Strava authentication
+                    // Add error message below the map for Strava authentication
                     const authMessage = `
-                        <div class="mt-4 bg-yellow-50 border border-yellow-200 rounded-md p-4">
+                        <div class="bg-yellow-50 border border-yellow-200 rounded-md p-4">
                             <div class="flex">
                                 <div class="flex-shrink-0">
                                     <svg class="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
@@ -572,7 +620,7 @@ function displayRoute(filename) {
                             </div>
                         </div>
                     `;
-                    resultContent.insertAdjacentHTML('beforeend', authMessage);
+                    completionInfo.innerHTML = authMessage;
                     
                     // Make sure the original route is still visible
                     originalRoute.addTo(routeLayer);
@@ -706,55 +754,42 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    // Check for Strava activity fetch progress
-    const urlParams = new URLSearchParams(window.location.search);
-    const fetchId = document.cookie.split('; ').find(row => row.startsWith('strava_fetch_id'))?.split('=')[1];
-    
-    if (fetchId) {
-        const progressModal = document.getElementById('stravaProgress');
-        const progressBar = document.getElementById('stravaProgressBar');
-        const progressStep = document.getElementById('stravaProgressStep');
-        const progressPercent = document.getElementById('stravaProgressPercent');
-        const progressMessage = document.getElementById('stravaProgressMessage');
-        
-        progressModal.classList.remove('hidden');
-        
-        // Set up SSE for progress updates
-        const eventSource = new EventSource(`/strava/fetch-progress/${fetchId}`);
-        
-        eventSource.onmessage = function(event) {
-            try {
-                const data = JSON.parse(event.data);
-                console.log('Strava progress update:', data);
-                
-                if (data.type === 'progress') {
-                    if (data.step) progressStep.textContent = data.step;
-                    if (data.progress) {
-                        progressBar.style.width = `${data.progress}%`;
-                        progressPercent.textContent = `${data.progress}%`;
-                    }
-                    if (data.message) progressMessage.textContent = data.message;
-                } else if (data.type === 'done') {
-                    console.log('Activity fetch complete');
-                    eventSource.close();
-                    // Hide progress modal after a short delay
-                    setTimeout(() => {
-                        progressModal.classList.add('hidden');
-                    }, 1000);
+    // Location search functionality
+    const startPointInput = document.getElementById('startPoint');
+    const locationInput = document.getElementById('location');
+
+    // Simple function to search locations
+    async function searchLocation(query) {
+        try {
+            const baseUrl = 'https://nominatim.openstreetmap.org/search';
+            const params = new URLSearchParams({
+                format: 'json',
+                q: query,
+                limit: 1,
+                addressdetails: 1,
+                countrycodes: 'us',
+                'accept-language': 'en'
+            });
+
+            const response = await fetch(`${baseUrl}?${params}`, {
+                headers: {
+                    'User-Agent': 'OptiburB Route Generator v1.0'
                 }
-            } catch (error) {
-                console.error('Error processing server message:', error, event.data);
-                eventSource.close();
+            });
+
+            if (!response.ok) {
+                throw new Error(`Search failed: ${response.status}`);
             }
-        };
-        
-        eventSource.onerror = function(error) {
-            console.error('EventSource error:', error);
-            eventSource.close();
-            progressModal.classList.add('hidden');
-        };
+
+            const results = await response.json();
+            return results[0] || null; // Return first result or null
+        } catch (error) {
+            console.error('Error in searchLocation:', error);
+            return null;
+        }
     }
 
+    // Handle form submission
     const form = document.getElementById('routeForm');
     const loading = document.getElementById('loading');
     const result = document.getElementById('result');
@@ -808,89 +843,50 @@ document.addEventListener('DOMContentLoaded', function() {
             directionsLayer = null;
             straightLinesLayer = null;
         }
-        
+
         const sessionId = generateSessionId();
         console.log('Starting route generation with session:', sessionId);
-        
-        // Set up SSE for progress updates
-        const eventSource = new EventSource(`/progress/${sessionId}`);
-        
-        eventSource.onmessage = function(event) {
-            try {
-                const data = JSON.parse(event.data);
-                console.log('Progress update:', data);
-                
-                if (data.type === 'progress') {
-                    updateProgress(data);
-                } else if (data.type === 'error') {
-                    console.error('Server error:', data.message);
-                    eventSource.close();
-                    loading.classList.add('hidden');
-                    resultContent.innerHTML = `
-                        <div class="bg-red-50 border border-red-200 rounded-md p-4">
-                            <div class="flex">
-                                <div class="flex-shrink-0">
-                                    <svg class="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
-                                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
-                                    </svg>
-                                </div>
-                                <div class="ml-3">
-                                    <p class="text-sm font-medium text-red-800">
-                                        ${data.message}
-                                    </p>
-                                </div>
-                            </div>
-                        </div>
-                    `;
-                    result.classList.remove('hidden');
-                } else if (data.type === 'done') {
-                    console.log('Processing complete');
-                    eventSource.close();
-                }
-            } catch (error) {
-                console.error('Error processing server message:', error, event.data);
-                eventSource.close();
-            }
-        };
 
-        eventSource.onerror = function(error) {
-            console.error('EventSource error:', error);
-            eventSource.close();
-            loading.classList.add('hidden');
-            resultContent.innerHTML = `
-                <div class="bg-red-50 border border-red-200 rounded-md p-4">
-                    <div class="flex">
-                        <div class="flex-shrink-0">
-                            <svg class="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
-                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
-                            </svg>
-                        </div>
-                        <div class="ml-3">
-                            <p class="text-sm font-medium text-red-800">
-                                Connection error. Please try again.
-                            </p>
-                        </div>
-                    </div>
-                </div>
-            `;
-            result.classList.remove('hidden');
-        };
-        
-        // Get form data
-        const formData = {
-            location: document.getElementById('location').value,
-            start_point: document.getElementById('startPoint').value || null,
-            simplify: document.querySelector('input[name="simplify"]').checked,
-            prune: document.querySelector('input[name="prune"]').checked,
-            simplify_gpx: document.querySelector('input[name="simplifyGpx"]').checked,
-            exclude_completed: document.querySelector('input[name="excludeCompleted"]')?.checked || false,
-            buffer: parseInt(document.getElementById('bufferSize').value), // Send buffer size in meters
-            session_id: sessionId
-        };
-        
-        console.log('Form data:', formData);
-        
         try {
+            // Get form data
+            const location = locationInput.value.trim();
+            const startPoint = startPointInput.value.trim();
+            
+            // Validate inputs
+            if (!location) {
+                throw new Error('Please enter a location');
+            }
+
+            // Initialize formData first
+            const formData = {
+                location: location,
+                start_point: null,
+                start_coordinates: null,
+                simplify: document.querySelector('input[name="simplify"]').checked,
+                prune: document.querySelector('input[name="prune"]').checked,
+                simplify_gpx: document.querySelector('input[name="simplifyGpx"]').checked,
+                exclude_completed: document.querySelector('input[name="excludeCompleted"]')?.checked || false,
+                buffer: parseInt(document.getElementById('bufferSize').value),
+                session_id: sessionId
+            };
+
+            // If start point is provided, validate it and update formData
+            let startLocation = null;
+            if (startPoint) {
+                startLocation = await searchLocation(startPoint);
+                if (!startLocation) {
+                    throw new Error('Could not find the specified start point');
+                }
+                // Update formData with start location info
+                formData.start_point = startLocation.display_name;
+                formData.start_coordinates = [
+                    parseFloat(startLocation.lat),
+                    parseFloat(startLocation.lon)
+                ];
+            }
+            
+            console.log('Form data:', formData);
+            
             // Send request to generate route
             console.log('Sending route generation request');
             const response = await fetch('/generate', {
@@ -924,7 +920,6 @@ document.addEventListener('DOMContentLoaded', function() {
             displayRoute(data.gpx_file);
         } catch (error) {
             console.error('Error in route generation:', error);
-            // Show error message
             resultContent.innerHTML = `
                 <div class="bg-red-50 border border-red-200 rounded-md p-4">
                     <div class="flex">
@@ -943,12 +938,7 @@ document.addEventListener('DOMContentLoaded', function() {
             `;
             result.classList.remove('hidden');
         } finally {
-            // Hide loading spinner
             loading.classList.add('hidden');
-            // Close SSE connection if still open
-            if (eventSource) {
-                eventSource.close();
-            }
         }
     });
 });
