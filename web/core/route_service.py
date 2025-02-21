@@ -8,33 +8,15 @@ def _is_coincident_with_straight_line(self, segment_coords, straight_line_segmen
     """Check if a segment is coincident with any straight line segments within buffer distance (~30m)"""
     segment = shapely.geometry.LineString(segment_coords)
     segment_buffer = segment.buffer(buffer_distance)
-    segment_length = segment.length
     
     for straight_segment in straight_line_segments:
         straight_line = shapely.geometry.LineString(straight_segment['coordinates'])
         if segment_buffer.intersects(straight_line):
-            # Check both directions
+            # Check if most of the line overlaps (>80% overlap)
             intersection = segment_buffer.intersection(straight_line)
-            if not intersection.is_empty:
-                # Check if either line significantly overlaps with the other
-                overlap_ratio1 = intersection.length / segment_length
-                overlap_ratio2 = intersection.length / straight_line.length
-                
-                # Also check reverse direction
-                rev_coords = list(reversed(segment_coords))
-                rev_segment = shapely.geometry.LineString(rev_coords)
-                rev_buffer = rev_segment.buffer(buffer_distance)
-                rev_intersection = rev_buffer.intersection(straight_line)
-                if not rev_intersection.is_empty:
-                    rev_ratio1 = rev_intersection.length / segment_length
-                    rev_ratio2 = rev_intersection.length / straight_line.length
-                    overlap_ratio1 = max(overlap_ratio1, rev_ratio1)
-                    overlap_ratio2 = max(overlap_ratio2, rev_ratio2)
-                
-                # If either ratio is high enough, consider it coincident
-                if overlap_ratio1 > 0.7 or overlap_ratio2 > 0.7:
-                    logger.debug(f"Found coincident segment - overlap ratios: {overlap_ratio1:.2f}, {overlap_ratio2:.2f}")
-                    return True
+            overlap_ratio = intersection.length / straight_line.length
+            if overlap_ratio > 0.8:
+                return True
     return False
 
 def get_route_data(self, gpx_file):

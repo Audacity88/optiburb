@@ -295,17 +295,60 @@ function displayRoute(filename) {
                         // Process incomplete segments
                         console.info(`Processing ${completionData.incomplete_segments.length} incomplete segments and ${completionData.completed_segments.length} completed segments`);
                         
+                        // First, collect all straight line segments coordinates for comparison
+                        const straightLineSegments = [];
+                        [...completionData.incomplete_segments, ...completionData.completed_segments].forEach(segment => {
+                            if (segment.is_straight_line && segment.coordinates && segment.coordinates.length >= 2) {
+                                straightLineSegments.push({
+                                    start: segment.coordinates[0],
+                                    end: segment.coordinates[segment.coordinates.length - 1]
+                                });
+                            }
+                        });
+
+                        // Helper function to calculate distance between two points
+                        function getDistance(p1, p2) {
+                            return Math.sqrt(
+                                Math.pow(p1[0] - p2[0], 2) + 
+                                Math.pow(p1[1] - p2[1], 2)
+                            );
+                        }
+
+                        // Helper function to check if a segment is part of a straight line connection
+                        function isPartOfStraightLine(coords) {
+                            if (coords.length < 2) return false;
+                            
+                            const segmentStart = coords[0];
+                            const segmentEnd = coords[coords.length - 1];
+                            const tolerance = 0.0003; // Approximately 30 meters at typical lat/lng scale
+                            
+                            return straightLineSegments.some(straightLine => {
+                                // Check both forward and reverse directions
+                                const forwardMatch = 
+                                    getDistance(segmentStart, straightLine.start) < tolerance &&
+                                    getDistance(segmentEnd, straightLine.end) < tolerance;
+                                const reverseMatch = 
+                                    getDistance(segmentStart, straightLine.end) < tolerance &&
+                                    getDistance(segmentEnd, straightLine.start) < tolerance;
+                                return forwardMatch || reverseMatch;
+                            });
+                        }
+
+                        // Process incomplete segments
                         completionData.incomplete_segments.forEach(segment => {
                             if (!segment.coordinates || segment.coordinates.length < 2) return;
                             
                             // Fix coordinate order: Convert from [lng, lat] to [lat, lng]
                             const correctedCoords = segment.coordinates.map(coord => [coord[1], coord[0]]);
                             
+                            // Check if this segment is part of a straight line connection
+                            const isStraightLine = segment.is_straight_line || isPartOfStraightLine(segment.coordinates);
+                            
                             const line = L.polyline(correctedCoords, {
-                                color: segment.is_straight_line ? '#8b5cf6' : '#ef4444',  // purple for straight lines, red for others
-                                weight: segment.is_straight_line ? 4 : 5,
+                                color: isStraightLine ? '#8b5cf6' : '#ef4444',  // purple for straight lines, red for others
+                                weight: isStraightLine ? 4 : 5,
                                 opacity: 1.0,
-                                dashArray: segment.is_straight_line ? '10, 10' : null,
+                                dashArray: isStraightLine ? '10, 10' : null,
                                 pane: 'segmentsPane',
                                 interactive: true
                             });
@@ -316,14 +359,16 @@ function displayRoute(filename) {
                         completionData.completed_segments.forEach(segment => {
                             if (!segment.coordinates || segment.coordinates.length < 2) return;
                             
+                            // Skip if this segment is part of a straight line connection in either direction
+                            if (segment.is_straight_line || isPartOfStraightLine(segment.coordinates)) return;
+                            
                             // Fix coordinate order: Convert from [lng, lat] to [lat, lng]
                             const correctedCoords = segment.coordinates.map(coord => [coord[1], coord[0]]);
                             
                             const line = L.polyline(correctedCoords, {
-                                color: segment.is_straight_line ? '#8b5cf6' : '#22c55e',  // purple for straight lines, green for others
-                                weight: segment.is_straight_line ? 4 : 5,
+                                color: '#22c55e',  // green for completed segments
+                                weight: 5,
                                 opacity: 1.0,
-                                dashArray: segment.is_straight_line ? '10, 10' : null,
                                 pane: 'segmentsPane',
                                 interactive: true
                             });

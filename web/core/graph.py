@@ -61,6 +61,14 @@ class GraphManager:
             except Exception as e:
                 logger.error(f"Could not extract coordinates for node {node_id}: {str(e)}")
         
+        # First pass: identify edges that should be straight lines
+        straight_line_pairs = set()  # Store pairs of nodes where either direction should be a straight line
+        for idx, edge_data in edges.iterrows():
+            u, v, k = idx
+            if 'geometry' not in edge_data or edge_data['geometry'] is None:
+                straight_line_pairs.add(frozenset([u, v]))
+                logger.debug(f"Marking edge pair {u}<->{v} as straight line due to missing geometry")
+        
         # Transfer edge geometries from GeoDataFrame back to graph
         edges_with_geom = 0
         straight_lines = 0
@@ -77,15 +85,20 @@ class GraphManager:
                 # Add length if not present
                 if 'length' not in edge_attrs:
                     edge_attrs['length'] = edge_data['geometry'].length
-                # Mark as NOT a straight line since it has real OSM geometry
-                edge_attrs['is_straight_line'] = False
+                # Check if this edge pair should be a straight line
+                if frozenset([u, v]) in straight_line_pairs:
+                    edge_attrs['is_straight_line'] = True
+                    straight_lines += 1
+                    logger.debug(f"Edge {u}->{v} marked as straight line (synchronized)")
+                else:
+                    edge_attrs['is_straight_line'] = False
+                    logger.debug(f"Edge {u}->{v} marked with OSM geometry")
                 # Update edge in graph
                 self.g.remove_edge(u, v)
                 self.g.add_edge(u, v, **edge_attrs)
                 edges_with_geom += 1
                 if edges_with_geom % 100 == 0:
                     logger.info(f"Processed {edges_with_geom} edges with geometry")
-                logger.debug(f"Edge {u}->{v} marked with OSM geometry, is_straight_line=False")
             else:
                 # If no geometry, create straight line
                 try:
@@ -95,10 +108,11 @@ class GraphManager:
                     edge_attrs['geometry'] = osmnx.utils_graph.make_linestring((u_coords, v_coords))
                     edge_attrs['length'] = edge_attrs['geometry'].length
                     edge_attrs['is_straight_line'] = True  # Mark as straight line
+                    straight_line_pairs.add(frozenset([u, v]))  # Add to straight line pairs
                     self.g.remove_edge(u, v)
                     self.g.add_edge(u, v, **edge_attrs)
                     straight_lines += 1
-                    logger.debug(f"Edge {u}->{v} created with straight line geometry, is_straight_line=True")
+                    logger.debug(f"Edge {u}->{v} created with straight line geometry")
                 except Exception as e:
                     logger.error(f"Could not create straight line geometry for edge {u}->{v}: {str(e)}")
         
