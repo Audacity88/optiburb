@@ -5,6 +5,7 @@ let segmentsLayer = null;
 let activitiesLayer = null;
 let baseRouteLayer = null;
 let directionsLayer = null;  // Layer for direction arrows
+let straightLinesLayer = null;  // New layer for straight line segments
 
 // Global function for initializing map
 function initMap(center) {
@@ -21,6 +22,7 @@ function initMap(center) {
         activitiesLayer = null;
         baseRouteLayer = null;
         directionsLayer = null;
+        straightLinesLayer = null;
     }
 
     // Create new map instance
@@ -32,6 +34,7 @@ function initMap(center) {
     map.createPane('routePane');
     map.createPane('segmentsPane');
     map.createPane('directionsPane');  // New pane for directions
+    map.createPane('straightLinesPane');  // New pane for straight lines
     
     // Set z-index and pointer events for panes
     map.getPane('activitiesPane').style.zIndex = 300;
@@ -39,6 +42,7 @@ function initMap(center) {
     map.getPane('routePane').style.zIndex = 400;
     map.getPane('segmentsPane').style.zIndex = 500;
     map.getPane('directionsPane').style.zIndex = 600;  // Highest z-index for arrows
+    map.getPane('straightLinesPane').style.zIndex = 450;  // Between route and segments
     
     // Ensure pointer events are enabled
     map.getPane('activitiesPane').style.pointerEvents = 'auto';
@@ -46,6 +50,7 @@ function initMap(center) {
     map.getPane('routePane').style.pointerEvents = 'auto';
     map.getPane('segmentsPane').style.pointerEvents = 'auto';
     map.getPane('directionsPane').style.pointerEvents = 'none';  // No pointer events needed for arrows
+    map.getPane('straightLinesPane').style.pointerEvents = 'auto';
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
@@ -57,6 +62,7 @@ function initMap(center) {
     routeLayer = L.featureGroup([], { pane: 'routePane' });
     segmentsLayer = L.featureGroup([], { pane: 'segmentsPane' });
     directionsLayer = L.featureGroup([], { pane: 'directionsPane' });  // Initialize directions layer
+    straightLinesLayer = L.featureGroup([], { pane: 'straightLinesPane' });  // Initialize straight lines layer
 
     // Add layers to map in correct order
     activitiesLayer.addTo(map);
@@ -64,6 +70,7 @@ function initMap(center) {
     routeLayer.addTo(map);
     segmentsLayer.addTo(map);
     directionsLayer.addTo(map);
+    // Don't add straightLinesLayer by default - it will be controlled by the layer control
 
     // Force a resize event after the map is visible
     setTimeout(() => {
@@ -113,59 +120,83 @@ function displayRoute(filename) {
             initMap(center);
 
             // Add route lines first
-            const routeFeatures = data.geojson.features.filter(f => 
-                !f.properties || 
-                !f.properties.type || 
-                f.properties.type === 'route' || 
-                f.properties.type === 'straight_line'
-            );
+            console.log('All features:', data.geojson.features);
+            console.log('Features with straight_line type:', data.geojson.features.filter(f => f.properties && f.properties.type === 'straight_line'));
+            
+            // First separate direction features
             const directionFeatures = data.geojson.features.filter(f => 
                 f.properties && f.properties.type === 'direction'
             );
+
+            // Then separate straight line features
+            const straightLineFeatures = data.geojson.features.filter(f => 
+                f.properties && f.properties.type === 'straight_line'
+            );
+
+            // Finally get regular route features (excluding straight lines and directions)
+            const regularRouteFeatures = data.geojson.features.filter(f => 
+                (!f.properties || !f.properties.type || f.properties.type === 'route') &&
+                (!f.properties || f.properties.type !== 'straight_line') &&
+                (!f.properties || f.properties.type !== 'direction')
+            );
             
             // Log feature counts
-            console.log(`Found ${routeFeatures.length} route features and ${directionFeatures.length} direction features`);
+            console.log('Feature counts:');
+            console.log(`  Regular routes: ${regularRouteFeatures.length}`);
+            console.log(`  Straight lines: ${straightLineFeatures.length}`);
+            console.log(`  Directions: ${directionFeatures.length}`);
 
             // Log straight line segments specifically
-            const straightLineFeatures = routeFeatures.filter(f => f.properties && f.properties.type === 'straight_line');
+            console.log('Straight line features:', straightLineFeatures);
             console.log(`Found ${straightLineFeatures.length} straight line segments:`);
             straightLineFeatures.forEach((feature, index) => {
                 const coords = feature.geometry.coordinates;
                 console.log(`Straight line segment ${index + 1}:`);
                 console.log(`  Start: (${coords[0][1]}, ${coords[0][0]})`);
                 console.log(`  End: (${coords[coords.length-1][1]}, ${coords[coords.length-1][0]})`);
+                console.log('  Properties:', feature.properties);
             });
 
             // Add original route to base route layer
             baseRouteLayer.clearLayers();
+            straightLinesLayer.clearLayers();
             
-            // First add the route lines (without decorators)
+            // First add the regular route lines
             const baseRoute = L.geoJSON({
                 type: "FeatureCollection",
-                features: routeFeatures
+                features: regularRouteFeatures
             }, {
-                style: function(feature) {
-                    // Check if the feature is marked as a straight line
-                    if (feature.properties && feature.properties.type === 'straight_line') {
-                        console.log('Styling straight line segment');
-                        return {
-                            color: '#8b5cf6',  // purple color
-                            weight: 4,
-                            opacity: 1.0,
-                            dashArray: '10, 10',  // dashed line
-                            pane: 'segmentsPane'  // Use segments pane for higher z-index
-                        };
-                    }
-                    
-                    // Default style for normal roads
-                    return {
-                        color: '#0000ff',  // blue color
-                        weight: 3,
-                        opacity: 0.8,
-                        pane: 'baseRoutePane'
-                    };
+                style: {
+                    color: '#0000ff',  // blue color
+                    weight: 3,
+                    opacity: 0.8,
+                    pane: 'baseRoutePane'
                 }
             }).addTo(baseRouteLayer);
+
+            // Add straight line segments to their own layer
+            const straightLines = L.geoJSON({
+                type: "FeatureCollection",
+                features: straightLineFeatures
+            }, {
+                style: {
+                    color: '#8b5cf6',  // purple color
+                    weight: 4,
+                    opacity: 1.0,
+                    dashArray: '10, 10',  // dashed line
+                    pane: 'straightLinesPane'
+                }
+            }).addTo(straightLinesLayer);
+            
+            // Log the number of straight line segments
+            const straightLineCount = straightLines.getLayers().length;
+            console.log(`Added ${straightLineCount} straight line segments to the map`);
+
+            // Add straight lines layer to the map if there are straight line segments
+            if (straightLineCount > 0) {
+                map.addLayer(straightLinesLayer);
+                map.removeLayer(straightLinesLayer);  // Add but hide by default
+            }
             
             // Log the number of layers added
             console.log(`Added ${baseRoute.getLayers().length} layers to the map`);
@@ -288,20 +319,14 @@ function displayRoute(filename) {
                         // Store direction ticks before clearing
                         const directionTicks = directionsLayer.getLayers();
                         
-                        // Clear only the segments layer
-                        segmentsLayer.clearLayers();
-                        routeLayer.clearLayers();
-
-                        // Process incomplete segments
-                        console.info(`Processing ${completionData.incomplete_segments.length} incomplete segments and ${completionData.completed_segments.length} completed segments`);
-                        
                         // First, collect all straight line segments coordinates for comparison
                         const straightLineSegments = [];
                         [...completionData.incomplete_segments, ...completionData.completed_segments].forEach(segment => {
                             if (segment.is_straight_line && segment.coordinates && segment.coordinates.length >= 2) {
                                 straightLineSegments.push({
                                     start: segment.coordinates[0],
-                                    end: segment.coordinates[segment.coordinates.length - 1]
+                                    end: segment.coordinates[segment.coordinates.length - 1],
+                                    coordinates: segment.coordinates
                                 });
                             }
                         });
@@ -334,33 +359,53 @@ function displayRoute(filename) {
                             });
                         }
 
-                        // Process incomplete segments
+                        // Clear existing layers
+                        segmentsLayer.clearLayers();
+                        straightLinesLayer.clearLayers();
+                        baseRouteLayer.clearLayers();
+
+                        // First process straight line segments
+                        straightLineSegments.forEach(segment => {
+                            // Fix coordinate order: Convert from [lng, lat] to [lat, lng]
+                            const correctedCoords = segment.coordinates.map(coord => [coord[1], coord[0]]);
+                            
+                            const line = L.polyline(correctedCoords, {
+                                color: '#8b5cf6',  // purple color
+                                weight: 4,
+                                opacity: 1.0,
+                                dashArray: '10, 10',  // dashed line
+                                pane: 'straightLinesPane',
+                                interactive: true
+                            });
+                            line.addTo(straightLinesLayer);
+                        });
+
+                        // Then process incomplete segments (excluding straight lines)
                         completionData.incomplete_segments.forEach(segment => {
-                            if (!segment.coordinates || segment.coordinates.length < 2) return;
+                            if (!segment.coordinates || segment.coordinates.length < 2 || segment.is_straight_line) return;
+                            
+                            // Skip if it's part of a straight line
+                            if (isPartOfStraightLine(segment.coordinates)) return;
                             
                             // Fix coordinate order: Convert from [lng, lat] to [lat, lng]
                             const correctedCoords = segment.coordinates.map(coord => [coord[1], coord[0]]);
                             
-                            // Check if this segment is part of a straight line connection
-                            const isStraightLine = segment.is_straight_line || isPartOfStraightLine(segment.coordinates);
-                            
                             const line = L.polyline(correctedCoords, {
-                                color: isStraightLine ? '#8b5cf6' : '#ef4444',  // purple for straight lines, red for others
-                                weight: isStraightLine ? 4 : 5,
+                                color: '#ef4444',  // red for incomplete segments
+                                weight: 5,
                                 opacity: 1.0,
-                                dashArray: isStraightLine ? '10, 10' : null,
                                 pane: 'segmentsPane',
                                 interactive: true
                             });
                             line.addTo(segmentsLayer);
                         });
                         
-                        // Process complete segments
+                        // Finally process complete segments (excluding straight lines)
                         completionData.completed_segments.forEach(segment => {
-                            if (!segment.coordinates || segment.coordinates.length < 2) return;
+                            if (!segment.coordinates || segment.coordinates.length < 2 || segment.is_straight_line) return;
                             
-                            // Skip if this segment is part of a straight line connection in either direction
-                            if (segment.is_straight_line || isPartOfStraightLine(segment.coordinates)) return;
+                            // Skip if it's part of a straight line
+                            if (isPartOfStraightLine(segment.coordinates)) return;
                             
                             // Fix coordinate order: Convert from [lng, lat] to [lat, lng]
                             const correctedCoords = segment.coordinates.map(coord => [coord[1], coord[0]]);
@@ -375,6 +420,39 @@ function displayRoute(filename) {
                             line.addTo(segmentsLayer);
                         });
 
+                        // Add remaining route segments to base route layer (excluding straight lines)
+                        const allSegmentCoords = new Set();
+                        [...completionData.incomplete_segments, ...completionData.completed_segments].forEach(segment => {
+                            if (!segment.coordinates) return;
+                            segment.coordinates.forEach(coord => allSegmentCoords.add(JSON.stringify(coord)));
+                        });
+
+                        // Filter regular route features to exclude straight lines and segments
+                        const remainingRouteFeatures = regularRouteFeatures.filter(feature => {
+                            if (!feature.geometry || !feature.geometry.coordinates) return false;
+                            // Skip if it's a straight line
+                            if (feature.properties && feature.properties.type === 'straight_line') return false;
+                            // Skip if it's part of a straight line
+                            if (isPartOfStraightLine(feature.geometry.coordinates)) return false;
+                            // Skip if all coordinates are part of segments
+                            return !feature.geometry.coordinates.every(coord => 
+                                allSegmentCoords.has(JSON.stringify(coord))
+                            );
+                        });
+
+                        // Add remaining route features to base route layer
+                        L.geoJSON({
+                            type: "FeatureCollection",
+                            features: remainingRouteFeatures
+                        }, {
+                            style: {
+                                color: '#0000ff',  // blue color
+                                weight: 3,
+                                opacity: 0.8,
+                                pane: 'baseRoutePane'
+                            }
+                        }).addTo(baseRouteLayer);
+
                         // Re-add direction ticks to the directions layer
                         directionTicks.forEach(tick => {
                             tick.addTo(directionsLayer);
@@ -385,13 +463,15 @@ function displayRoute(filename) {
                         baseRouteLayer.remove();
                         directionsLayer.remove();
                         segmentsLayer.remove();
+                        straightLinesLayer.remove();
                         
                         // Add layers in correct order (bottom to top)
                         activitiesLayer.addTo(map);
                         baseRouteLayer.addTo(map);
                         segmentsLayer.addTo(map);
-                        directionsLayer.addTo(map);  // Add directions layer last to keep arrows on top
-                        
+                        directionsLayer.addTo(map);
+                        // Don't add straightLinesLayer - it will be controlled by the layer control
+
                         // Force map update and redraw
                         map.invalidateSize();
                         map._onResize();
@@ -421,6 +501,7 @@ function displayRoute(filename) {
                     // Add layer control with the new directions layer
                     const overlayMaps = {
                         "Route": baseRouteLayer,
+                        ...(straightLines.getLayers().length > 0 ? {"Straight Lines": straightLinesLayer} : {}),
                         "Directions": directionsLayer,
                         "Activities": activitiesLayer,
                         "Completed": segmentsLayer
@@ -434,7 +515,7 @@ function displayRoute(filename) {
                         position: 'topright'
                     }).addTo(map);
 
-                    // Ensure all layers are visible by default
+                    // Ensure all layers except straight lines are visible by default
                     map.addLayer(baseRouteLayer);
                     map.addLayer(directionsLayer);
                     map.addLayer(activitiesLayer);
@@ -602,6 +683,7 @@ async function handleFileUpload(input) {
             activitiesLayer = null;
             baseRouteLayer = null;
             directionsLayer = null;
+            straightLinesLayer = null;
         }
 
         // Display the uploaded route
@@ -724,6 +806,7 @@ document.addEventListener('DOMContentLoaded', function() {
             activitiesLayer = null;
             baseRouteLayer = null;
             directionsLayer = null;
+            straightLinesLayer = null;
         }
         
         const sessionId = generateSessionId();
