@@ -29,16 +29,13 @@ class RouteGenerator:
     def filter_completed_roads(self, graph, completed_buffer):
         """Filter out completed roads from the graph."""
         logger.info("=== Starting completed roads filtering ===")
-        
         total_edges = graph.number_of_edges()
         edges_with_geometry = 0
         edges_intersecting = 0
         high_overlap_edges = 0
-        
-        # Track completed and uncompleted edges separately
-        completed_pairs = {}  # {frozenset(u,v): (edge1, edge2)} for completed bidirectional edges
         uncompleted_edges = set()
-        nodes_with_uncompleted = set()  # Nodes that have uncompleted edges
+        completed_pairs = {}
+        nodes_with_uncompleted = set()
         
         # Helper function to safely copy edge data
         def copy_edge_data(data):
@@ -71,8 +68,15 @@ class RouteGenerator:
                     data['geometry'] = edge_geom
                     data['is_straight_line'] = True  # Mark as straight line
                 except (KeyError, AttributeError) as e:
-                    logger.error(f"Cannot create geometry for edge {u}-{v}: {str(e)}")
+                    logger.error(f"Cannot create geometry for edge {u}->{v}: {str(e)}")
                     continue
+            
+            # Always preserve straight line segments
+            if data.get('is_straight_line', False):
+                uncompleted_edges.add((u, v))
+                nodes_with_uncompleted.add(u)
+                nodes_with_uncompleted.add(v)
+                continue
             
             # Create buffer around edge (5 meters)
             edge_buffer = edge_geom.buffer(0.00005)
@@ -134,6 +138,17 @@ class RouteGenerator:
                         rev_overlap = rev_intersection.area / rev_buffer.area if rev_buffer.area > 0 else 0
                         if rev_overlap <= 0.5:  # Changed from 0.7 to 0.5
                             uncompleted_edges.add((v, u))
+            else:
+                # Edge doesn't intersect with completed area at all
+                uncompleted_edges.add((u, v))
+                nodes_with_uncompleted.add(u)
+                nodes_with_uncompleted.add(v)
+                
+                # If there's a reverse edge, it's also not completed
+                if graph.has_edge(v, u):
+                    uncompleted_edges.add((v, u))
+                    nodes_with_uncompleted.add(u)
+                    nodes_with_uncompleted.add(v)
 
         logger.info(f"Edge analysis:")
         logger.info(f"  - Total edges: {total_edges}")
