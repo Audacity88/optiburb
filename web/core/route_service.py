@@ -1,3 +1,9 @@
+import os
+import gpxpy
+import shapely.geometry
+from web.utils.logging import logger
+from web.config import settings
+
 def get_route_data(self, gpx_file):
         """
         Get route data including completion status from a GPX file.

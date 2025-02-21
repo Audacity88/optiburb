@@ -61,6 +61,7 @@ class RouteGenerator:
             if 'geometry' in data:
                 edges_with_geometry += 1
                 edge_geom = data['geometry']
+                data['is_straight_line'] = False  # Mark as NOT straight line since it has real geometry
             else:
                 # Create straight line geometry if none exists
                 try:
@@ -567,14 +568,11 @@ class RouteGenerator:
                     u_coords = (graph.nodes[u]['x'], graph.nodes[u]['y'])
                     v_coords = (graph.nodes[v]['x'], graph.nodes[v]['y'])
                     coords_to_use = [u_coords, v_coords]
-                    # Only create straight line if we had to generate new coordinates and it wasn't already straight
-                    if not is_straight_line:
-                        is_straight_line = True
-                        straight_line_edges += 1
-                        logger.debug(f"Created straight line coordinates for edge {(u,v)} due to missing coordinates")
-                    edge_data['length'] = self.geometry.calculate_distance(u_coords, v_coords)
+                    # Only calculate length if needed
+                    if 'length' not in edge_data:
+                        edge_data['length'] = self.geometry.calculate_distance(u_coords, v_coords)
                 except (KeyError, AttributeError) as e:
-                    logger.error(f"Cannot create straight line coordinates for edge {(u,v)}: {str(e)}")
+                    logger.error(f"Cannot create coordinates for edge {(u,v)}: {str(e)}")
                     continue
 
             if not coords_to_use:

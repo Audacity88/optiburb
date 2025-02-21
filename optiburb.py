@@ -23,6 +23,7 @@ from web.core import (
 )
 from web.utils.logging import logger
 import osmnx
+import gpxpy
 
 class Burbing:
     WARNING = '''Note: This program now considers one-way streets and road directionality. Please still verify routes for safety.'''
@@ -142,6 +143,7 @@ def main():
     parser.add_argument('--shapefile', type=str, default=None, help='filename of shapefile to load localities, comma separated by the column to match on')
     parser.add_argument('--buffer', type=int, dest='buffer', default=500, help='buffer distance in meters around polygon')
     parser.add_argument('--save-fig', default=False, action='store_true', help='save an SVG image of the nodes and edges')
+    parser.add_argument('--completed-roads', type=str, help='GPX file containing completed roads to exclude')
 
     args = parser.parse_args()
 
@@ -179,6 +181,32 @@ def main():
 
     if args.start:
         burbing.set_start_location(args.start)
+
+    # Load completed roads if specified
+    if args.completed_roads:
+        try:
+            with open(args.completed_roads, 'r') as f:
+                gpx = gpxpy.parse(f)
+            
+            # Create a buffer around the GPX track
+            points = []
+            for track in gpx.tracks:
+                for segment in track.segments:
+                    for point in segment.points:
+                        points.append((point.longitude, point.latitude))
+            
+            if points:
+                # Create a LineString from the points and buffer it
+                line = shapely.geometry.LineString(points)
+                buffer_size = 0.00005  # About 5 meters
+                burbing.completed_area = line.buffer(buffer_size)
+                if not burbing.completed_area.is_valid:
+                    burbing.completed_area = burbing.completed_area.buffer(0)
+                logger.info(f"Loaded completed roads from {args.completed_roads}")
+            else:
+                logger.warning("No points found in completed roads GPX file")
+        except Exception as e:
+            logger.error(f"Error loading completed roads: {str(e)}")
 
     burbing.load(args)
 
