@@ -99,8 +99,8 @@ function initMap(center) {
 }
 
 // Global function for displaying route
-function displayRoute(filename) {
-    console.log('Attempting to display route for:', filename);
+function displayRoute(filename, startCoordinates = null) {
+    console.log('Attempting to display route for:', filename, 'with start coordinates:', startCoordinates);
     const mapContainer = document.getElementById('mapContainer');
     const result = document.getElementById('result');
     const resultContent = document.getElementById('resultContent');
@@ -133,19 +133,33 @@ function displayRoute(filename) {
                 throw new Error('No bounds data available for the route');
             }
 
-            console.log('Route bounds:', bounds);
-            const center = [
-                (bounds.minLat + bounds.maxLat) / 2,
-                (bounds.minLng + bounds.maxLng) / 2
-            ];
-            console.log('Map center:', center);
+            // Use provided start coordinates if available, otherwise use the ones from the route data
+            data.start_coordinates = startCoordinates || data.start_coordinates;
+            console.log('Using start coordinates:', data.start_coordinates);
 
-            // Initialize new map - this will clear all existing layers
-            console.log('Initializing new map');
-            // If we have start coordinates, use those for initial center
-            const mapCenter = data.start_coordinates || center;
-            console.log('Using map center:', mapCenter, 'Start coordinates:', data.start_coordinates);
-            initMap(mapCenter);
+            console.log('Route bounds:', bounds);
+            // If we have start coordinates, initialize map centered on start point
+            if (data.start_coordinates) {
+                console.log('Initializing map centered on start point:', data.start_coordinates);
+                initMap(data.start_coordinates);
+                
+                // Add a marker for the start location immediately
+                const startMarker = L.marker(data.start_coordinates, {
+                    title: 'Start Location',
+                    icon: L.divIcon({
+                        className: 'start-marker',
+                        html: '<div></div>'
+                    })
+                }).addTo(map);
+            } else {
+                // Fall back to route center if no start point
+                const center = [
+                    (bounds.minLat + bounds.maxLat) / 2,
+                    (bounds.minLng + bounds.maxLng) / 2
+                ];
+                console.log('Falling back to route center:', center);
+                initMap(center);
+            }
 
             // Add route lines first
             console.debug('All features:', data.geojson.features);
@@ -162,11 +176,16 @@ function displayRoute(filename) {
             );
 
             // Finally get regular route features (excluding straight lines and directions)
-            const regularRouteFeatures = data.geojson.features.filter(f => 
-                (!f.properties || !f.properties.type || f.properties.type === 'route') &&
-                (!f.properties || f.properties.type !== 'straight_line') &&
-                (!f.properties || f.properties.type !== 'direction')
-            );
+            const regularRouteFeatures = data.geojson.features.filter(f => {
+                // Skip if no properties
+                if (!f.properties) return false;
+                
+                // Skip if it's a straight line or direction
+                if (f.properties.type === 'straight_line' || f.properties.type === 'direction') return false;
+                
+                // Include only if it's a route or has no type specified
+                return f.properties.type === 'route' || !f.properties.type;
+            });
             
             // Log feature counts
             console.debug('Feature counts:');
@@ -188,6 +207,7 @@ function displayRoute(filename) {
             // Add original route to base route layer
             baseRouteLayer.clearLayers();
             straightLinesLayer.clearLayers();
+            routeLayer.clearLayers();  // Clear route layer as well
             
             // First add the regular route lines
             const baseRoute = L.geoJSON({
@@ -200,7 +220,7 @@ function displayRoute(filename) {
                     opacity: 0.8,
                     pane: 'baseRoutePane'
                 }
-            }).addTo(baseRouteLayer);
+            }).addTo(baseRouteLayer);  // Add to baseRouteLayer, not routeLayer
 
             // Add straight line segments to their own layer
             const straightLines = L.geoJSON({
@@ -216,15 +236,8 @@ function displayRoute(filename) {
                 }
             }).addTo(straightLinesLayer);
             
-            // Log the number of straight line segments
-            const straightLineCount = straightLines.getLayers().length;
-            console.log(`Added ${straightLineCount} straight line segments to the map`);
-
-            // Add straight lines layer to the map if there are straight line segments
-            if (straightLineCount > 0) {
-                map.addLayer(straightLinesLayer);
-                map.removeLayer(straightLinesLayer);  // Add but hide by default
-            }
+            // Make sure base route layer is visible
+            baseRouteLayer.addTo(map);
             
             // Log the number of layers added
             console.log(`Added ${baseRoute.getLayers().length} layers to the map`);
@@ -282,23 +295,14 @@ function displayRoute(filename) {
 
             // Fit map to route bounds with padding
             console.log('Fitting map to bounds');
-            // If we have start coordinates, adjust bounds to include them
+            // If we have start coordinates, ensure they're included in bounds
             if (data.start_coordinates) {
                 console.log('Adjusting bounds to include start coordinates:', data.start_coordinates);
-                bounds.minLat = Math.min(bounds.minLat, data.start_coordinates[0]);
-                bounds.maxLat = Math.max(bounds.maxLat, data.start_coordinates[0]);
-                bounds.minLng = Math.min(bounds.minLng, data.start_coordinates[1]);
-                bounds.maxLng = Math.max(bounds.maxLng, data.start_coordinates[1]);
-                
-                // Add a marker for the start location
-                const startMarker = L.marker(data.start_coordinates, {
-                    title: 'Start Location',
-                    icon: L.divIcon({
-                        className: 'start-marker',
-                        html: '<div></div>'
-                    })
-                }).addTo(map);
-                
+                const padding = 0.002; // Add some padding to ensure start point isn't right at the edge
+                bounds.minLat = Math.min(bounds.minLat, data.start_coordinates[0] - padding);
+                bounds.maxLat = Math.max(bounds.maxLat, data.start_coordinates[0] + padding);
+                bounds.minLng = Math.min(bounds.minLng, data.start_coordinates[1] - padding);
+                bounds.maxLng = Math.max(bounds.maxLng, data.start_coordinates[1] + padding);
                 console.log('Updated bounds:', bounds);
             }
             
@@ -509,6 +513,7 @@ function displayRoute(filename) {
                         // Ensure proper layer order
                         activitiesLayer.remove();
                         baseRouteLayer.remove();
+                        routeLayer.remove();
                         directionsLayer.remove();
                         segmentsLayer.remove();
                         straightLinesLayer.remove();
@@ -516,6 +521,7 @@ function displayRoute(filename) {
                         // Add layers in correct order (bottom to top)
                         activitiesLayer.addTo(map);
                         baseRouteLayer.addTo(map);
+                        routeLayer.addTo(map);
                         segmentsLayer.addTo(map);
                         directionsLayer.addTo(map);
                         // Don't add straightLinesLayer - it will be controlled by the layer control
@@ -537,9 +543,13 @@ function displayRoute(filename) {
                             style: {
                                 color: '#ef4444',  // red
                                 weight: 5,
-                                opacity: 1.0
+                                opacity: 1.0,
+                                pane: 'routePane'  // Ensure it uses the correct pane
                             }
                         }).addTo(routeLayer);
+                        
+                        // Make sure route layer is on the map
+                        routeLayer.addTo(map);
                     }
 
                     // Log layer information
@@ -548,7 +558,7 @@ function displayRoute(filename) {
 
                     // Add layer control with the new directions layer
                     const overlayMaps = {
-                        "Route": baseRouteLayer,
+                        "Route": routeLayer,  // Change from baseRouteLayer to routeLayer
                         ...(straightLines.getLayers().length > 0 ? {"Straight Lines": straightLinesLayer} : {}),
                         "Directions": directionsLayer,
                         "Activities": activitiesLayer,
@@ -564,7 +574,7 @@ function displayRoute(filename) {
                     }).addTo(map);
 
                     // Ensure all layers except straight lines are visible by default
-                    map.addLayer(baseRouteLayer);
+                    map.addLayer(routeLayer);
                     map.addLayer(directionsLayer);
                     map.addLayer(activitiesLayer);
                     map.addLayer(segmentsLayer);
@@ -826,6 +836,12 @@ document.addEventListener('DOMContentLoaded', function() {
     form.addEventListener('submit', async function(e) {
         e.preventDefault();
         
+        // Clear any existing completion information immediately
+        const existingCompletion = document.querySelector('.completion-info');
+        if (existingCompletion) {
+            existingCompletion.remove();
+        }
+        
         // Show loading spinner and progress
         loading.classList.remove('hidden');
         result.classList.add('hidden');
@@ -877,12 +893,14 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (!startLocation) {
                     throw new Error('Could not find the specified start point');
                 }
-                // Update formData with start location info
+                // Update formData with start location info and use it as the center location
                 formData.start_point = startLocation.display_name;
                 formData.start_coordinates = [
                     parseFloat(startLocation.lat),
                     parseFloat(startLocation.lon)
                 ];
+                // Use the start point as the location center instead of the original location
+                formData.location = startLocation.display_name;
             }
             
             console.log('Form data:', formData);
@@ -916,8 +934,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 });
             }
 
-            // Display route on map
-            displayRoute(data.gpx_file);
+            // Display route on map with start coordinates
+            displayRoute(data.gpx_file, formData.start_coordinates);
         } catch (error) {
             console.error('Error in route generation:', error);
             resultContent.innerHTML = `
