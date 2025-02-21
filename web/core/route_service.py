@@ -4,6 +4,39 @@ import shapely.geometry
 from web.utils.logging import logger
 from web.config import settings
 
+def _is_coincident_with_straight_line(self, segment_coords, straight_line_segments, buffer_distance=0.0003):
+    """Check if a segment is coincident with any straight line segments within buffer distance (~30m)"""
+    segment = shapely.geometry.LineString(segment_coords)
+    segment_buffer = segment.buffer(buffer_distance)
+    segment_length = segment.length
+    
+    for straight_segment in straight_line_segments:
+        straight_line = shapely.geometry.LineString(straight_segment['coordinates'])
+        if segment_buffer.intersects(straight_line):
+            # Check both directions
+            intersection = segment_buffer.intersection(straight_line)
+            if not intersection.is_empty:
+                # Check if either line significantly overlaps with the other
+                overlap_ratio1 = intersection.length / segment_length
+                overlap_ratio2 = intersection.length / straight_line.length
+                
+                # Also check reverse direction
+                rev_coords = list(reversed(segment_coords))
+                rev_segment = shapely.geometry.LineString(rev_coords)
+                rev_buffer = rev_segment.buffer(buffer_distance)
+                rev_intersection = rev_buffer.intersection(straight_line)
+                if not rev_intersection.is_empty:
+                    rev_ratio1 = rev_intersection.length / segment_length
+                    rev_ratio2 = rev_intersection.length / straight_line.length
+                    overlap_ratio1 = max(overlap_ratio1, rev_ratio1)
+                    overlap_ratio2 = max(overlap_ratio2, rev_ratio2)
+                
+                # If either ratio is high enough, consider it coincident
+                if overlap_ratio1 > 0.7 or overlap_ratio2 > 0.7:
+                    logger.debug(f"Found coincident segment - overlap ratios: {overlap_ratio1:.2f}, {overlap_ratio2:.2f}")
+                    return True
+    return False
+
 def get_route_data(self, gpx_file):
         """
         Get route data including completion status from a GPX file.
@@ -98,6 +131,7 @@ def get_route_data(self, gpx_file):
         # Process route segments
         logger.info('Starting route segment processing...')
         segments = []
+        straight_line_segments = []
         total_distance = 0
         completed_distance = 0
         
@@ -120,20 +154,29 @@ def get_route_data(self, gpx_file):
                     segment_length = self.geometry.calculate_length(segment_line)
                     total_distance += segment_length
                     
-                    # Check completion for non-straight line segments
-                    is_completed = False
-                    if not is_straight_line:
-                        segment_buffer = segment_line.buffer(0.0001)  # ~10m buffer
-                        is_completed = segment_buffer.intersects(activity_map)
-                        if is_completed:
-                            completed_distance += segment_length
-                    
-                    segments.append({
+                    segment_data = {
                         'coordinates': segment_coords,
-                        'is_completed': is_completed,
+                        'is_completed': False,
                         'is_straight_line': is_straight_line,
                         'length': segment_length
-                    })
+                    }
+                    
+                    if is_straight_line:
+                        straight_line_segments.append(segment_data)
+                    else:
+                        # Check if this route segment is coincident with any straight line
+                        if self._is_coincident_with_straight_line(segment_coords, straight_line_segments):
+                            segment_data['is_straight_line'] = True
+                            logger.info(f'Found route segment coincident with straight line at {segment_coords[0]}')
+                    
+                    # Check completion for non-straight line segments
+                    if not segment_data['is_straight_line']:
+                        segment_buffer = segment_line.buffer(0.0001)  # ~10m buffer
+                        segment_data['is_completed'] = segment_buffer.intersects(activity_map)
+                        if segment_data['is_completed']:
+                            completed_distance += segment_length
+                    
+                    segments.append(segment_data)
                 
                 current_segment = []
                 is_straight_line = point_type == 'straight_line'
@@ -142,28 +185,6 @@ def get_route_data(self, gpx_file):
             if point_type != 'direction':
                 current_segment.append(point)
                 is_straight_line = point_type == 'straight_line'
-        
-        # Add final segment
-        if len(current_segment) >= 2:
-            segment_coords = [(p.longitude, p.latitude) for p in current_segment]
-            segment_line = shapely.geometry.LineString(segment_coords)
-            segment_length = self.geometry.calculate_length(segment_line)
-            total_distance += segment_length
-            
-            # Check completion for non-straight line segments
-            is_completed = False
-            if not is_straight_line:
-                segment_buffer = segment_line.buffer(0.0001)  # ~10m buffer
-                is_completed = segment_buffer.intersects(activity_map)
-                if is_completed:
-                    completed_distance += segment_length
-            
-            segments.append({
-                'coordinates': segment_coords,
-                'is_completed': is_completed,
-                'is_straight_line': is_straight_line,
-                'length': segment_length
-            })
         
         # Split segments into completed and incomplete
         completed_segments = [s for s in segments if s['is_completed']]
