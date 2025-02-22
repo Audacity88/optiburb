@@ -27,6 +27,39 @@ let baseRouteLayer = null;
 let directionsLayer = null;  // Layer for direction arrows
 let straightLinesLayer = null;  // New layer for straight line segments
 
+// Configuration object for map settings
+const MAP_CONFIG = {
+    defaultZoom: 13,
+    maxZoom: 15,
+    mapPadding: 50,
+    searchLimit: 10,
+    bufferTolerance: 0.0003,  // For straight line detection
+    arrowBaseLength: 0.0002,  // For direction arrows
+    arrowBackAngle: 40,  // Degrees for arrow back points
+    layerWeights: {
+        baseRoute: 3,
+        straightLine: 4,
+        direction: 3.5,
+        activity: 2,
+        completed: 5
+    },
+    layerColors: {
+        baseRoute: '#0000ff',
+        straightLine: '#8b5cf6',
+        direction: '#3388ff',
+        activity: '#ff69b4',
+        completed: '#22c55e',
+        incomplete: '#ef4444'
+    },
+    layerOpacity: {
+        baseRoute: 0.8,
+        straightLine: 1.0,
+        direction: 1.0,
+        activity: 0.6,
+        completed: 1.0
+    }
+};
+
 // Global function for initializing map
 function initMap(center) {
     // Show map container before initializing map
@@ -46,7 +79,7 @@ function initMap(center) {
     }
 
     // Create new map instance
-    map = L.map('map').setView(center, 13);
+    map = L.map('map').setView(center, MAP_CONFIG.defaultZoom);
     
     // Create custom panes with explicit z-index values
     map.createPane('activitiesPane');
@@ -209,9 +242,9 @@ function displayRoute(filename, startCoordinates = null) {
                 features: regularRouteFeatures
             }, {
                 style: {
-                    color: '#0000ff',  // blue color
-                    weight: 3,
-                    opacity: 0.8,
+                    color: MAP_CONFIG.layerColors.baseRoute,
+                    weight: MAP_CONFIG.layerWeights.baseRoute,
+                    opacity: MAP_CONFIG.layerOpacity.baseRoute,
                     pane: 'baseRoutePane'
                 }
             }).addTo(baseRouteLayer);
@@ -222,10 +255,10 @@ function displayRoute(filename, startCoordinates = null) {
                 features: straightLineFeatures
             }, {
                 style: {
-                    color: '#8b5cf6',  // purple color
-                    weight: 4,
-                    opacity: 1.0,
-                    dashArray: '10, 10',  // dashed line
+                    color: MAP_CONFIG.layerColors.straightLine,
+                    weight: MAP_CONFIG.layerWeights.straightLine,
+                    opacity: MAP_CONFIG.layerOpacity.straightLine,
+                    dashArray: '10, 10',
                     pane: 'straightLinesPane'
                 }
             }).addTo(straightLinesLayer);
@@ -280,9 +313,9 @@ function displayRoute(filename, startCoordinates = null) {
                 
                 // Create the arrow shape from front to back points (increased weight to match larger size)
                 const tick = L.polyline([frontPoint, center, leftPoint, center, rightPoint], {
-                    color: '#3388ff',
-                    weight: 3.5,  // Increased from 2.5 to match larger size
-                    opacity: 1.0,
+                    color: MAP_CONFIG.layerColors.direction,
+                    weight: MAP_CONFIG.layerWeights.direction,
+                    opacity: MAP_CONFIG.layerOpacity.direction,
                     pane: 'directionsPane'
                 }).addTo(directionsLayer);
             });
@@ -311,8 +344,8 @@ function displayRoute(filename, startCoordinates = null) {
                 [bounds.minLat, bounds.minLng],
                 [bounds.maxLat, bounds.maxLng]
             ], { 
-                padding: [50, 50],
-                maxZoom: 15
+                padding: [MAP_CONFIG.mapPadding, MAP_CONFIG.mapPadding],
+                maxZoom: MAP_CONFIG.maxZoom
             });
 
             // Now try to fetch completion data
@@ -340,9 +373,9 @@ function displayRoute(filename, startCoordinates = null) {
                             console.log(`Adding activity ${index + 1}`);
                             const line = L.geoJSON(activity, {
                                 style: {
-                                    color: '#ff69b4',  // hot pink
-                                    weight: 2,
-                                    opacity: 0.6
+                                    color: MAP_CONFIG.layerColors.activity,
+                                    weight: MAP_CONFIG.layerWeights.activity,
+                                    opacity: MAP_CONFIG.layerOpacity.activity
                                 }
                             });
 
@@ -398,16 +431,14 @@ function displayRoute(filename, startCoordinates = null) {
                             
                             const segmentStart = coords[0];
                             const segmentEnd = coords[coords.length - 1];
-                            const tolerance = 0.0003; // Approximately 30 meters at typical lat/lng scale
                             
                             return straightLineSegments.some(straightLine => {
-                                // Check both forward and reverse directions
                                 const forwardMatch = 
-                                    getDistance(segmentStart, straightLine.start) < tolerance &&
-                                    getDistance(segmentEnd, straightLine.end) < tolerance;
+                                    getDistance(segmentStart, straightLine.start) < MAP_CONFIG.bufferTolerance &&
+                                    getDistance(segmentEnd, straightLine.end) < MAP_CONFIG.bufferTolerance;
                                 const reverseMatch = 
-                                    getDistance(segmentStart, straightLine.end) < tolerance &&
-                                    getDistance(segmentEnd, straightLine.start) < tolerance;
+                                    getDistance(segmentStart, straightLine.end) < MAP_CONFIG.bufferTolerance &&
+                                    getDistance(segmentEnd, straightLine.start) < MAP_CONFIG.bufferTolerance;
                                 return forwardMatch || reverseMatch;
                             });
                         }
@@ -424,9 +455,9 @@ function displayRoute(filename, startCoordinates = null) {
                             const correctedCoords = segment.coordinates.map(coord => [coord[1], coord[0]]);
                             
                             const line = L.polyline(correctedCoords, {
-                                color: '#8b5cf6',  // purple color
-                                weight: 4,
-                                opacity: 1.0,
+                                color: MAP_CONFIG.layerColors.straightLine,
+                                weight: MAP_CONFIG.layerWeights.straightLine,
+                                opacity: MAP_CONFIG.layerOpacity.straightLine,
                                 dashArray: '10, 10',  // dashed line
                                 pane: 'straightLinesPane',
                                 interactive: true
@@ -446,9 +477,9 @@ function displayRoute(filename, startCoordinates = null) {
                             
                             // Add to Route layer in blue
                             const routeLine = L.polyline(correctedCoords, {
-                                color: '#0000ff',  // blue for route segments
-                                weight: 3,
-                                opacity: 0.8,
+                                color: MAP_CONFIG.layerColors.baseRoute,
+                                weight: MAP_CONFIG.layerWeights.baseRoute,
+                                opacity: MAP_CONFIG.layerOpacity.baseRoute,
                                 pane: 'routePane',
                                 interactive: true
                             });
@@ -457,9 +488,9 @@ function displayRoute(filename, startCoordinates = null) {
                             // Add to Completed layer with appropriate color
                             const isComplete = completionData.completed_segments.includes(segment);
                             const completedLine = L.polyline(correctedCoords, {
-                                color: isComplete ? '#22c55e' : '#ef4444',  // green for completed, red for incomplete
-                                weight: 5,
-                                opacity: 1.0,
+                                color: isComplete ? MAP_CONFIG.layerColors.completed : MAP_CONFIG.layerColors.incomplete,
+                                weight: MAP_CONFIG.layerWeights.completed,
+                                opacity: MAP_CONFIG.layerOpacity.completed,
                                 pane: 'segmentsPane',
                                 interactive: true
                             });
@@ -501,9 +532,9 @@ function displayRoute(filename, startCoordinates = null) {
                         routeLayer.clearLayers();
                         L.geoJSON(data.geojson, {
                             style: {
-                                color: '#ef4444',  // red
-                                weight: 5,
-                                opacity: 1.0,
+                                color: MAP_CONFIG.layerColors.incomplete,
+                                weight: MAP_CONFIG.layerWeights.baseRoute,
+                                opacity: MAP_CONFIG.layerOpacity.baseRoute,
                                 pane: 'routePane'  // Ensure it uses the correct pane
                             }
                         }).addTo(routeLayer);
@@ -729,61 +760,112 @@ document.addEventListener('DOMContentLoaded', function() {
     const locationInput = document.getElementById('location');
 
     // Simple function to search locations
-    async function searchLocation(query) {
+    async function searchLocation(query, cityContext = null) {
         try {
             const baseUrl = 'https://nominatim.openstreetmap.org/search';
-            let searchQuery = query;
+            let searchQuery = query.trim();
             
-            // If the query doesn't include a city/state, append Austin, TX
-            if (!query.toLowerCase().includes('austin') && !query.toLowerCase().includes('tx')) {
-                // Add "street" if it looks like a street address but doesn't include it
-                if (/^\d+\s+[^,]+$/.test(query.trim())) {
-                    searchQuery = `${query} street`;
+            // Format the city context if provided
+            const formattedCity = cityContext ? cityContext.trim() : '';
+            
+            // If searching for a street address
+            if (searchQuery.match(/^\d+/)) {  // If query starts with numbers (likely an address)
+                // First try with "Street" since that seems to work best
+                const withStreet = `${searchQuery}${searchQuery.toLowerCase().includes('street') ? '' : ' Street'}`;
+                if (formattedCity && !withStreet.toLowerCase().includes(formattedCity.toLowerCase())) {
+                    searchQuery = `${withStreet}, ${formattedCity}`;
+                } else {
+                    searchQuery = withStreet;
                 }
-                // Append Austin, TX to the search query
-                searchQuery = `${searchQuery}, Austin, TX`;
-            }
-            
-            const params = new URLSearchParams({
-                format: 'json',
-                q: searchQuery,
-                limit: 5,  // Get more results to find better matches
-                addressdetails: 1,
-                countrycodes: 'us',
-                'accept-language': 'en'
-            });
-
-            console.log('Searching for location:', searchQuery);  // Debug log
-            const response = await fetch(`${baseUrl}?${params}`, {
-                headers: {
-                    'User-Agent': 'OptiburB Route Generator v1.0'
+                
+                console.log('Trying search with:', searchQuery);
+                let results = await performSearch(baseUrl, searchQuery);
+                if (results.length) {
+                    return filterResultsByCity(results, formattedCity);
                 }
-            });
 
-            if (!response.ok) {
-                throw new Error(`Search failed: ${response.status}`);
-            }
+                // If that fails, try original query
+                const originalQuery = `${query.trim()}${formattedCity ? `, ${formattedCity}` : ''}`;
+                if (originalQuery !== searchQuery) {
+                    console.log('Trying original query:', originalQuery);
+                    results = await performSearch(baseUrl, originalQuery);
+                    if (results.length) {
+                        return filterResultsByCity(results, formattedCity);
+                    }
+                }
 
-            const results = await response.json();
-            console.log('Search results:', results);  // Debug log
-            
-            if (!results.length) {
+                // Last resort: try with minimal formatting
+                const minimalMatch = searchQuery.match(/^(\d+)\s+(?:[NSEW]\.\s*)?([^,\s]+)/i);
+                if (minimalMatch) {
+                    const minimalQuery = `${minimalMatch[1]} ${minimalMatch[2]}, ${formattedCity}`;
+                    if (minimalQuery !== searchQuery && minimalQuery !== originalQuery) {
+                        console.log('Trying minimal query:', minimalQuery);
+                        results = await performSearch(baseUrl, minimalQuery);
+                        if (results.length) {
+                            return filterResultsByCity(results, formattedCity);
+                        }
+                    }
+                }
+
                 return null;
+            } else {
+                // For non-address searches
+                if (formattedCity) {
+                    searchQuery = `${searchQuery}, ${formattedCity}`;
+                }
+                const results = await performSearch(baseUrl, searchQuery);
+                return results.length ? filterResultsByCity(results, formattedCity) : null;
             }
-
-            // Try to find a result in Austin, TX
-            const austinMatch = results.find(result => {
-                const address = result.address || {};
-                const city = (address.city || '').toLowerCase();
-                const state = (address.state || '').toLowerCase();
-                return city === 'austin' && (state === 'texas' || state === 'tx');
-            });
-
-            return austinMatch || results[0];  // Return Austin match if found, otherwise first result
         } catch (error) {
             console.error('Error in searchLocation:', error);
             return null;
         }
+    }
+
+    // Helper function to filter results by city
+    function filterResultsByCity(results, cityContext) {
+        if (!cityContext || !results.length) return results[0];
+
+        const [cityName, stateCode] = cityContext.split(',').map(part => part.trim().toLowerCase());
+        const cityMatch = results.find(result => {
+            const address = result.address || {};
+            const resultCity = (address.city || '').toLowerCase();
+            const resultState = (address.state || '').toLowerCase();
+            return resultCity === cityName && 
+                   (resultState === stateCode || resultState.includes(stateCode));
+        });
+        return cityMatch || results[0];
+    }
+
+    // Helper function to perform the actual search
+    async function performSearch(baseUrl, query) {
+        const params = new URLSearchParams({
+            format: 'json',
+            q: query,
+            limit: MAP_CONFIG.searchLimit,
+            addressdetails: 1,
+            countrycodes: 'us',
+            'accept-language': 'en'
+        });
+
+        const searchUrl = `${baseUrl}?${params}`;
+        console.log('Search URL:', searchUrl);
+        console.log('Search query:', query);
+
+        const response = await fetch(searchUrl, {
+            headers: {
+                'User-Agent': 'OptiburB Route Generator v1.0'
+            }
+        });
+
+        if (!response.ok) {
+            console.error('Search failed with status:', response.status);
+            throw new Error(`Search failed: ${response.status}`);
+        }
+
+        const results = await response.json();
+        console.log('Search results:', results);
+        return results;
     }
 
     // Handle form submission
@@ -853,8 +935,8 @@ document.addEventListener('DOMContentLoaded', function() {
         try {
             // Initialize formData first
             const formData = {
-                location: null,  // No default location
-                center_coordinates: null,  // No default coordinates
+                location: null,
+                center_coordinates: null,
                 start_point: null,
                 simplify: document.querySelector('input[name="simplify"]').checked,
                 prune: document.querySelector('input[name="prune"]').checked,
@@ -879,8 +961,8 @@ document.addEventListener('DOMContentLoaded', function() {
             // Get the start point location if provided
             const startPoint = startPointInput.value.trim();
             if (startPoint) {
-                // Search for the start point location
-                const startLocation = await searchLocation(startPoint);
+                // Search for the start point location using city as context
+                const startLocation = await searchLocation(startPoint, cityInput);
                 if (!startLocation) {
                     throw new Error('Could not find the specified start point');
                 }
@@ -890,10 +972,10 @@ document.addEventListener('DOMContentLoaded', function() {
                     parseFloat(startLocation.lat),
                     parseFloat(startLocation.lon)
                 ];
-                formData.center_coordinates = coordinates;  // Use start point as center
+                formData.center_coordinates = coordinates;
                 formData.start_point = startLocation.display_name;
                 formData.start_coordinates = coordinates;
-                formData.location = cityLocation.display_name;  // Keep city name for context
+                formData.location = cityLocation.display_name;
             } else {
                 // If no start point, use city coordinates as center
                 const cityCoordinates = [
