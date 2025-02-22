@@ -14,6 +14,8 @@ from web.utils.logging import logger
 import os
 from web.config import settings
 import shapely
+import requests
+import time
 
 class RouteGenerator:
     def __init__(self, geometry_manager):
@@ -25,6 +27,63 @@ class RouteGenerator:
         """
         self.geometry = geometry_manager
         self.euler_circuit = None
+
+    def _get_elevation(self, lat, lon):
+        """
+        Get elevation data for a point using the Open-Elevation API.
+        
+        Args:
+            lat (float): Latitude
+            lon (float): Longitude
+            
+        Returns:
+            float: Elevation in meters, or None if the request fails
+        """
+        try:
+            # Use Open-Elevation API
+            url = f"https://api.open-elevation.com/api/v1/lookup?locations={lat},{lon}"
+            response = requests.get(url)
+            if response.ok:
+                data = response.json()
+                if 'results' in data and len(data['results']) > 0:
+                    return data['results'][0]['elevation']
+            logger.warning(f"Failed to get elevation data for point ({lat}, {lon})")
+            return None
+        except Exception as e:
+            logger.error(f"Error getting elevation data: {str(e)}")
+            return None
+
+    def _get_elevations_batch(self, points):
+        """
+        Get elevation data for multiple points in a single request.
+        
+        Args:
+            points (list): List of (lat, lon) tuples
+            
+        Returns:
+            list: List of elevation values in meters
+        """
+        try:
+            # Format points for the API request
+            locations = "|".join(f"{lat},{lon}" for lat, lon in points)
+            url = "https://api.open-elevation.com/api/v1/lookup"
+            response = requests.post(url, json={
+                "locations": [
+                    {"latitude": lat, "longitude": lon}
+                    for lat, lon in points
+                ]
+            })
+            
+            if response.ok:
+                data = response.json()
+                if 'results' in data:
+                    return [result['elevation'] for result in data['results']]
+            
+            logger.warning(f"Failed to get batch elevation data for {len(points)} points")
+            return [None] * len(points)
+        except Exception as e:
+            logger.error(f"Error getting batch elevation data: {str(e)}")
+            return [None] * len(points)
 
     def filter_completed_roads(self, graph, completed_buffer):
         """Filter out completed roads from the graph."""
@@ -523,7 +582,7 @@ class RouteGenerator:
 
     def create_gpx_track(self, graph, edges, simplify=False):
         """
-        Create a GPX track with direction indicators.
+        Create a GPX track with direction indicators and elevation data.
         
         Args:
             graph (nx.DiGraph): The graph containing the edges
@@ -538,7 +597,7 @@ class RouteGenerator:
         total_direction_markers = 0
         straight_line_edges = 0
 
-        logger.info('Creating GPX track with direction indicators')
+        logger.info('Creating GPX track with direction indicators and elevation data')
         logger.info(f'Number of edges to process: {len(edges)}')
 
         # First count straight line edges in input and store them for verification
@@ -577,6 +636,23 @@ class RouteGenerator:
 
         i = 1
         arrow_interval = 3  # Add direction arrow every 3 points
+
+        # Collect all coordinates first for batch elevation request
+        all_coords = []
+        coord_indices = {}  # Map (lat, lon) to index in all_coords
+        points_to_create = []  # Store point creation info for later
+
+        # Function to sample points from a line
+        def sample_points(coords, max_points=10):
+            if len(coords) <= max_points:
+                return coords
+            # Always include first and last points
+            if len(coords) == 2:
+                return coords
+            # For longer segments, sample evenly
+            step = (len(coords) - 1) / (max_points - 1)
+            indices = [int(i * step) for i in range(max_points - 1)] + [len(coords) - 1]
+            return [coords[i] for i in indices]
 
         for n, (u, v, edge_data) in enumerate(edges):
             # First check if this edge was originally marked as straight line
@@ -620,13 +696,14 @@ class RouteGenerator:
                     if hasattr(linestring, 'coords'):
                         coords_list = list(linestring.coords)
                         if coords_list:
-                            coords_to_use = coords_list
+                            # Sample points for long segments
+                            coords_to_use = sample_points(coords_list)
                 
                     # If we couldn't get coords directly, try directional linestring
                     if not coords_to_use:
                         directional_coords = self.geometry.get_directional_linestring((u,v), linestring, graph.nodes)
                         if directional_coords:
-                            coords_to_use = directional_coords
+                            coords_to_use = sample_points(directional_coords)
                 except Exception as e:
                     logger.error(f"Error extracting coordinates from LineString: {str(e)}")
 
@@ -634,7 +711,7 @@ class RouteGenerator:
                 try:
                     u_coords = (graph.nodes[u]['x'], graph.nodes[u]['y'])
                     v_coords = (graph.nodes[v]['x'], graph.nodes[v]['y'])
-                    coords_to_use = [u_coords, v_coords]
+                    coords_to_use = [u_coords, v_coords]  # No need to sample 2-point lines
                     # Only calculate length if needed
                     if 'length' not in edge_data:
                         edge_data['length'] = self.geometry.calculate_distance(u_coords, v_coords)
@@ -646,37 +723,91 @@ class RouteGenerator:
                 logger.error(f"No valid coordinates found for edge {(u,v)}")
                 continue
 
-            # Choose which segment to add points to
+            # Store coordinates and point creation info
             target_segment = straight_segment if is_straight_line else real_segment
-
-            # Add points to the appropriate track segment
             for j, coord in enumerate(coords_to_use):
-                point = gpxpy.gpx.GPXTrackPoint(coord[1], coord[0])
+                lat, lon = coord[1], coord[0]
+                coord_key = (lat, lon)
                 
-                # Set point type based on whether it's a straight line
-                point.type = 'straight_line' if is_straight_line else 'route'
-                if j == 0:  # Log for first point of each edge
-                    logger.debug(f"Edge {(u,v)} marked as {'straight line' if is_straight_line else 'route'} in GPX")
+                # Only add coordinates we haven't seen before
+                if coord_key not in coord_indices:
+                    coord_indices[coord_key] = len(all_coords)
+                    all_coords.append((lat, lon))
                 
-                target_segment.points.append(point)
-                
-                # Add direction markers only for real roads (not straight lines)
-                if not is_straight_line and j > 0 and j < len(coords_to_use) and (i + j) % arrow_interval == 0:
-                    # Create direction marker point
-                    marker = gpxpy.gpx.GPXTrackPoint(coord[1], coord[0])
-                    marker.type = 'direction'
-                    
-                    # Calculate bearing from previous point
-                    prev_coord = coords_to_use[j-1]
-                    bearing = self.geometry.calculate_bearing(
-                        prev_coord[1], prev_coord[0],
-                        coord[1], coord[0]
-                    )
-                    marker.comment = str(bearing)
-                    target_segment.points.append(marker)
-                    total_direction_markers += 1
+                # Store point creation info
+                points_to_create.append({
+                    'coord_key': coord_key,
+                    'segment': target_segment,
+                    'is_straight_line': is_straight_line,
+                    'edge': (u, v),
+                    'position': j,
+                    'total_positions': len(coords_to_use),
+                    'i': i + j
+                })
 
             i += len(coords_to_use)
+
+        # Get elevations in batches
+        logger.info(f"Fetching elevation data for {len(all_coords)} unique points")
+        batch_size = 500  # Increased batch size
+        elevations = {}
+        
+        for start in range(0, len(all_coords), batch_size):
+            end = min(start + batch_size, len(all_coords))
+            batch = all_coords[start:end]
+            
+            try:
+                batch_elevations = self._get_elevations_batch(batch)
+                if batch_elevations:
+                    for (lat, lon), elevation in zip(batch, batch_elevations):
+                        if elevation is not None:
+                            elevations[(lat, lon)] = elevation
+                
+                # Add a small delay between batches
+                if end < len(all_coords):
+                    time.sleep(0.1)
+            except Exception as e:
+                logger.error(f"Error getting elevation batch {start}-{end}: {str(e)}")
+
+        # Create points with elevation data
+        for point_info in points_to_create:
+            coord_key = point_info['coord_key']
+            lat, lon = coord_key
+            
+            point = gpxpy.gpx.GPXTrackPoint(lat, lon)
+            
+            # Add elevation if available
+            elevation = elevations.get(coord_key)
+            if elevation is not None:
+                point.elevation = elevation
+            
+            # Set point type
+            point.type = 'straight_line' if point_info['is_straight_line'] else 'route'
+            
+            # Add point to appropriate segment
+            point_info['segment'].points.append(point)
+            
+            # Add direction markers for non-straight lines
+            if (not point_info['is_straight_line'] and 
+                point_info['position'] > 0 and 
+                point_info['position'] < point_info['total_positions'] and 
+                point_info['i'] % arrow_interval == 0):
+                
+                marker = gpxpy.gpx.GPXTrackPoint(lat, lon)
+                marker.type = 'direction'
+                
+                # Add elevation to marker
+                if elevation is not None:
+                    marker.elevation = elevation
+                
+                # Calculate bearing from previous point
+                prev_info = points_to_create[points_to_create.index(point_info) - 1]
+                prev_lat, prev_lon = prev_info['coord_key']
+                bearing = self.geometry.calculate_bearing(prev_lat, prev_lon, lat, lon)
+                marker.comment = str(bearing)
+                
+                point_info['segment'].points.append(marker)
+                total_direction_markers += 1
 
         # Verify we have points in at least one segment
         if not real_segment.points and not straight_segment.points:
@@ -705,7 +836,8 @@ class RouteGenerator:
                             'lat': point.latitude,
                             'lon': point.longitude,
                             'type': point.type,
-                            'comment': point.comment if hasattr(point, 'comment') else None
+                            'comment': point.comment if hasattr(point, 'comment') else None,
+                            'elevation': point.elevation if hasattr(point, 'elevation') else None
                         })
             
             # Remove direction markers temporarily from real roads segment
@@ -720,11 +852,13 @@ class RouteGenerator:
             
             arrow_interval = max(3, len(simplified_points) // (total_direction_markers + 1))
             for i, point in enumerate(simplified_points):
-                # Try to find matching original point to preserve type
+                # Try to find matching original point to preserve type and elevation
                 closest_original = min(point_data, key=lambda p: 
                     abs(p['lat'] - point.latitude) + abs(p['lon'] - point.longitude))
                 
                 point.type = 'route'  # All points in real_segment are routes
+                if closest_original.get('elevation') is not None:
+                    point.elevation = closest_original['elevation']
                 real_segment.points.append(point)
                 
                 # Add direction markers at intervals
@@ -735,6 +869,8 @@ class RouteGenerator:
                     )
                     marker.type = 'direction'
                     marker.symbol = '➜'
+                    if closest_original.get('elevation') is not None:
+                        marker.elevation = closest_original['elevation']
                     next_point = simplified_points[i + 1]
                     bearing = self.geometry.calculate_bearing(
                         point.latitude, point.longitude,

@@ -156,119 +156,133 @@ function displayRoute(filename, startCoordinates = null) {
             } else {
                 // Create the AI summary HTML
                 const summary = summaryData.summary;
-                const aiSummaryHtml = `
-                    <div class="space-y-6">
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div class="space-y-2">
-                                <h4 class="font-medium text-gray-700">Distance</h4>
-                                <div class="text-sm space-y-1">
-                                    <div class="flex justify-between">
-                                        <span class="text-gray-600">Total</span>
-                                        <span class="font-medium">${summary.distance.kilometers.toFixed(1)} km (${summary.distance.miles.toFixed(1)} mi)</span>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="space-y-2">
-                                <h4 class="font-medium text-gray-700">Elevation</h4>
-                                <div class="text-sm space-y-1">
-                                    <div class="flex justify-between">
-                                        <span class="text-gray-600">Gain</span>
-                                        <span class="font-medium">↑ ${summary.elevation.gain_meters}m</span>
-                                    </div>
-                                    <div class="flex justify-between">
-                                        <span class="text-gray-600">Loss</span>
-                                        <span class="font-medium">↓ ${summary.elevation.loss_meters}m</span>
-                                    </div>
-                                    <div class="flex justify-between">
-                                        <span class="text-gray-600">Net</span>
-                                        <span class="font-medium">${summary.elevation.net_meters}m</span>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="space-y-2">
-                                <h4 class="font-medium text-gray-700">Terrain</h4>
-                                <div class="text-sm space-y-1">
-                                    <div class="flex justify-between">
-                                        <span class="text-gray-600">Hilliness</span>
-                                        <span class="font-medium">${summary.hilliness.description}</span>
-                                    </div>
-                                    <div class="w-full bg-gray-200 rounded-full h-1.5 mt-1">
-                                        <div class="bg-blue-600 h-1.5 rounded-full" style="width: ${summary.hilliness.score}%"></div>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="space-y-2">
-                                <h4 class="font-medium text-gray-700">Safety</h4>
-                                <div class="text-sm space-y-1">
-                                    <div class="flex justify-between">
-                                        <span class="text-gray-600">Rating</span>
-                                        <span class="font-medium">${summary.safety.description}</span>
-                                    </div>
-                                    <div class="w-full bg-gray-200 rounded-full h-1.5 mt-1">
-                                        <div class="bg-blue-600 h-1.5 rounded-full" style="width: ${summary.safety.score}%"></div>
-                                    </div>
-                                    ${summary.safety.factors.map(factor => `
-                                        <div class="flex justify-between text-xs mt-1">
-                                            <span class="text-gray-500">${factor.factor}</span>
-                                            <span class="text-gray-600">${factor.description}</span>
-                                        </div>
-                                    `).join('')}
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="border-t border-gray-200 pt-4">
-                            <h4 class="font-medium text-gray-700 mb-2">Estimated Time to Complete</h4>
-                            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                                <div class="bg-gray-50 p-3 rounded-md">
-                                    <div class="text-sm font-medium text-gray-900">Walking</div>
-                                    <div class="mt-1 text-sm text-gray-600">${summary.estimated_time.walking.hours} hours</div>
-                                    <div class="text-xs text-gray-500">${summary.estimated_time.walking.pace_kmh} km/h</div>
-                                </div>
-                                <div class="bg-gray-50 p-3 rounded-md">
-                                    <div class="text-sm font-medium text-gray-900">Running</div>
-                                    <div class="mt-1 text-sm text-gray-600">${summary.estimated_time.running.hours} hours</div>
-                                    <div class="text-xs text-gray-500">${summary.estimated_time.running.pace_kmh} km/h</div>
-                                </div>
-                                <div class="bg-gray-50 p-3 rounded-md">
-                                    <div class="text-sm font-medium text-gray-900">Cycling</div>
-                                    <div class="mt-1 text-sm text-gray-600">${summary.estimated_time.cycling.hours} hours</div>
-                                    <div class="text-xs text-gray-500">${summary.estimated_time.cycling.pace_kmh} km/h</div>
-                                </div>
-                            </div>
-                        </div>
-
-                        ${summary.alerts.length > 0 ? `
-                            <div class="border-t border-gray-200 pt-4">
-                                <h4 class="font-medium text-gray-700 mb-2">Alerts</h4>
+                // Store the summary data for use in completion section
+                const aiSummaryElement = document.getElementById('aiSummary');
+                aiSummaryElement.dataset.summary = JSON.stringify(summary);
+                
+                // We'll update the AI summary HTML after we get the completion data
+                window.updateAiSummary = function(totalDistance) {
+                    const aiSummaryHtml = `
+                        <div class="space-y-6">
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                 <div class="space-y-2">
-                                    ${summary.alerts.map(alert => `
-                                        <div class="flex items-start space-x-2 text-sm">
-                                            <div class="flex-shrink-0">
-                                                ${alert.severity === 'warning' ? `
-                                                    <svg class="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
-                                                        <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
-                                                    </svg>
-                                                ` : `
-                                                    <svg class="h-5 w-5 text-blue-400" viewBox="0 0 20 20" fill="currentColor">
-                                                        <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/>
-                                                    </svg>
-                                                `}
+                                    <h4 class="font-medium text-gray-700">Distance</h4>
+                                    <div class="text-sm space-y-1">
+                                        <div class="flex justify-between">
+                                            <span class="text-gray-600">Total</span>
+                                            <span class="font-medium">${totalDistance} km</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                ${summary.elevation && (summary.elevation.gain_meters !== undefined) ? `
+                                    <div class="space-y-2">
+                                        <h4 class="font-medium text-gray-700">Elevation</h4>
+                                        <div class="text-sm space-y-1">
+                                            <div class="flex justify-between">
+                                                <span class="text-gray-600">Gain</span>
+                                                <span class="font-medium">↑ ${summary.elevation.gain_meters}m</span>
                                             </div>
-                                            <div class="flex-1">
-                                                <p class="text-gray-600">${alert.message}</p>
+                                            <div class="flex justify-between">
+                                                <span class="text-gray-600">Loss</span>
+                                                <span class="font-medium">↓ ${summary.elevation.loss_meters}m</span>
+                                            </div>
+                                            <div class="flex justify-between">
+                                                <span class="text-gray-600">Net</span>
+                                                <span class="font-medium">${summary.elevation.net_meters}m</span>
                                             </div>
                                         </div>
-                                    `).join('')}
+                                    </div>
+                                ` : `
+                                    <div class="space-y-2">
+                                        <h4 class="font-medium text-gray-700">Elevation</h4>
+                                        <div class="text-sm text-gray-600 italic">
+                                            Elevation data not available
+                                        </div>
+                                    </div>
+                                `}
+
+                                ${summary.hilliness ? `
+                                    <div class="space-y-2">
+                                        <h4 class="font-medium text-gray-700">Terrain</h4>
+                                        <div class="text-sm space-y-1">
+                                            <div class="flex justify-between">
+                                                <span class="text-gray-600">Hilliness</span>
+                                                <span class="font-medium">${summary.hilliness.description}</span>
+                                            </div>
+                                            <div class="w-full bg-gray-200 rounded-full h-1.5 mt-1">
+                                                <div class="bg-blue-600 h-1.5 rounded-full" style="width: ${summary.hilliness.score}%"></div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ` : ''}
+
+                                <div class="space-y-2">
+                                    <h4 class="font-medium text-gray-700">Safety</h4>
+                                    <div class="text-sm space-y-1">
+                                        <div class="flex justify-between">
+                                            <span class="text-gray-600">Rating</span>
+                                            <span class="font-medium">${summary.safety.description}</span>
+                                        </div>
+                                        <div class="w-full bg-gray-200 rounded-full h-1.5 mt-1">
+                                            <div class="bg-blue-600 h-1.5 rounded-full" style="width: ${summary.safety.score}%"></div>
+                                        </div>
+                                        ${summary.safety.factors.map(factor => `
+                                            <div class="flex justify-between text-xs mt-1">
+                                                <span class="text-gray-500">${factor.factor}</span>
+                                                <span class="text-gray-600">${factor.description}</span>
+                                            </div>
+                                        `).join('')}
+                                    </div>
                                 </div>
                             </div>
-                        ` : ''}
-                    </div>
-                `;
-                aiSummary.innerHTML = aiSummaryHtml;
+
+                            ${!summary.elevation || summary.elevation.gain_meters === undefined ? `
+                                <div class="bg-yellow-50 border border-yellow-200 rounded-md p-4 mt-4">
+                                    <div class="flex">
+                                        <div class="flex-shrink-0">
+                                            <svg class="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
+                                                <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
+                                            </svg>
+                                        </div>
+                                        <div class="ml-3">
+                                            <p class="text-sm text-yellow-700">
+                                                This route lacks elevation data. Some features like terrain analysis and hilliness score may be limited.
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+                            ` : ''}
+
+                            ${summary.alerts.length > 0 ? `
+                                <div class="border-t border-gray-200 pt-4">
+                                    <h4 class="font-medium text-gray-700 mb-2">Alerts</h4>
+                                    <div class="space-y-2">
+                                        ${summary.alerts.map(alert => `
+                                            <div class="flex items-start space-x-2 text-sm">
+                                                <div class="flex-shrink-0">
+                                                    ${alert.severity === 'warning' ? `
+                                                        <svg class="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
+                                                            <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
+                                                        </svg>
+                                                    ` : `
+                                                        <svg class="h-5 w-5 text-blue-400" viewBox="0 0 20 20" fill="currentColor">
+                                                            <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/>
+                                                        </svg>
+                                                    `}
+                                                </div>
+                                                <div class="flex-1">
+                                                    <p class="text-gray-600">${alert.message}</p>
+                                                </div>
+                                            </div>
+                                        `).join('')}
+                                    </div>
+                                </div>
+                            ` : ''}
+                        </div>
+                    `;
+                    aiSummary.innerHTML = aiSummaryHtml;
+                };
             }
         })
         .catch(error => {
@@ -717,24 +731,64 @@ function displayRoute(filename, startCoordinates = null) {
                     const totalDistance = (completionData.total_distance * 111).toFixed(1);  // Convert to km (rough approximation)
                     const completedDistance = (completionData.completed_distance * 111).toFixed(1);
 
+                    // Update the Route Analysis section with the total distance
+                    if (window.updateAiSummary) {
+                        window.updateAiSummary(totalDistance);
+                    }
+
                     const completionHtml = `
-                        <div class="bg-gray-50 border border-gray-200 rounded-md p-4">
-                            <h3 class="text-lg font-medium text-gray-900 mb-2">Route Completion</h3>
-                            <div class="space-y-2">
-                                <div class="flex justify-between">
-                                    <span class="text-gray-600">Completion</span>
-                                    <span class="font-medium">${completionPercentage}%</span>
-                                </div>
-                                <div class="w-full bg-gray-200 rounded-full h-2.5">
-                                    <div class="bg-green-600 h-2.5 rounded-full" style="width: ${completionPercentage}%"></div>
-                                </div>
-                                <div class="flex justify-between text-sm">
-                                    <span class="text-gray-600">Total Distance</span>
-                                    <span class="font-medium">${totalDistance} km</span>
-                                </div>
-                                <div class="flex justify-between text-sm">
-                                    <span class="text-gray-600">Completed</span>
-                                    <span class="font-medium">${completedDistance} km</span>
+                        <div class="space-y-6">
+                            <div class="bg-gray-50 border border-gray-200 rounded-md p-4">
+                                <h3 class="text-lg font-medium text-gray-900 mb-4">Route Completion</h3>
+                                <div class="space-y-4">
+                                    <div class="space-y-2">
+                                        <div class="flex justify-between">
+                                            <span class="text-gray-600">Completion</span>
+                                            <span class="font-medium">${completionPercentage}%</span>
+                                        </div>
+                                        <div class="w-full bg-gray-200 rounded-full h-2.5">
+                                            <div class="bg-green-600 h-2.5 rounded-full" style="width: ${completionPercentage}%"></div>
+                                        </div>
+                                        <div class="flex justify-between text-sm">
+                                            <span class="text-gray-600">Total Distance</span>
+                                            <span class="font-medium">${totalDistance} km</span>
+                                        </div>
+                                        <div class="flex justify-between text-sm">
+                                            <span class="text-gray-600">Completed</span>
+                                            <span class="font-medium">${completedDistance} km</span>
+                                        </div>
+                                    </div>
+
+                                    <div class="border-t border-gray-200 pt-4">
+                                        <h4 class="font-medium text-gray-700 mb-2">Estimated Time to Complete</h4>
+                                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                                            ${(() => {
+                                                try {
+                                                    const summary = JSON.parse(document.getElementById('aiSummary').dataset.summary);
+                                                    return `
+                                                        <div class="bg-white p-3 rounded-md shadow-sm">
+                                                            <div class="text-sm font-medium text-gray-900">Walking</div>
+                                                            <div class="mt-1 text-sm text-gray-600">${summary.estimated_time.walking.hours} hours</div>
+                                                            <div class="text-xs text-gray-500">${summary.estimated_time.walking.pace_kmh} km/h</div>
+                                                        </div>
+                                                        <div class="bg-white p-3 rounded-md shadow-sm">
+                                                            <div class="text-sm font-medium text-gray-900">Running</div>
+                                                            <div class="mt-1 text-sm text-gray-600">${summary.estimated_time.running.hours} hours</div>
+                                                            <div class="text-xs text-gray-500">${summary.estimated_time.running.pace_kmh} km/h</div>
+                                                        </div>
+                                                        <div class="bg-white p-3 rounded-md shadow-sm">
+                                                            <div class="text-sm font-medium text-gray-900">Cycling</div>
+                                                            <div class="mt-1 text-sm text-gray-600">${summary.estimated_time.cycling.hours} hours</div>
+                                                            <div class="text-xs text-gray-500">${summary.estimated_time.cycling.pace_kmh} km/h</div>
+                                                        </div>
+                                                    `;
+                                                } catch (e) {
+                                                    console.error('Error rendering time estimates:', e);
+                                                    return '<div class="col-span-3 text-sm text-gray-500">Time estimates unavailable</div>';
+                                                }
+                                            })()}
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
