@@ -765,20 +765,21 @@ function displayRoute(filename, startCoordinates = null) {
                                             ${(() => {
                                                 try {
                                                     const summary = JSON.parse(document.getElementById('aiSummary').dataset.summary);
+                                                    const remainingDistance = totalDistance * (1 - completionData.total_completion);
                                                     return `
                                                         <div class="bg-white p-3 rounded-md shadow-sm">
                                                             <div class="text-sm font-medium text-gray-900">Walking</div>
-                                                            <div class="mt-1 text-sm text-gray-600">${summary.estimated_time.walking.hours} hours</div>
+                                                            <div class="mt-1 text-sm text-gray-600">${(remainingDistance / summary.estimated_time.walking.pace_kmh).toFixed(1)} hours</div>
                                                             <div class="text-xs text-gray-500">${summary.estimated_time.walking.pace_kmh} km/h</div>
                                                         </div>
                                                         <div class="bg-white p-3 rounded-md shadow-sm">
                                                             <div class="text-sm font-medium text-gray-900">Running</div>
-                                                            <div class="mt-1 text-sm text-gray-600">${summary.estimated_time.running.hours} hours</div>
+                                                            <div class="mt-1 text-sm text-gray-600">${(remainingDistance / summary.estimated_time.running.pace_kmh).toFixed(1)} hours</div>
                                                             <div class="text-xs text-gray-500">${summary.estimated_time.running.pace_kmh} km/h</div>
                                                         </div>
                                                         <div class="bg-white p-3 rounded-md shadow-sm">
                                                             <div class="text-sm font-medium text-gray-900">Cycling</div>
-                                                            <div class="mt-1 text-sm text-gray-600">${summary.estimated_time.cycling.hours} hours</div>
+                                                            <div class="mt-1 text-sm text-gray-600">${(remainingDistance / summary.estimated_time.cycling.pace_kmh).toFixed(1)} hours</div>
                                                             <div class="text-xs text-gray-500">${summary.estimated_time.cycling.pace_kmh} km/h</div>
                                                         </div>
                                                     `;
