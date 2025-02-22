@@ -7,7 +7,7 @@
             "config": {
                 "maxLambdaSize": "15mb",
                 "runtime": "python3.10",
-                "installCommand": "yum install -y geos geos-devel && pip install --no-cache-dir --only-binary :all: -r requirements.txt"
+                "installCommand": "pip install --no-cache-dir --only-binary :all: -r requirements.txt"
             }
         }
     ],
