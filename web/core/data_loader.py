@@ -51,7 +51,7 @@ class DataLoader:
         Args:
             location (str): Location name or description
             select (int): Which result to use from geocoding (default: 1)
-            buffer_dist (float): Buffer distance in degrees around the point
+            buffer_dist (float): Buffer distance in degrees around the center point
             
         Returns:
             shapely.geometry.Polygon: The polygon representing the area
@@ -59,22 +59,35 @@ class DataLoader:
         logger.info('searching for query=%s, which_result=%s', location, select)
 
         try:
-            # First get the coordinates using Nominatim geocoder
-            location_coords = osmnx.geocode(location)
-            if location_coords is None:
+            # Get the coordinates using Nominatim geocoder with full address details
+            params = {
+                'format': 'json',
+                'addressdetails': 1,
+                'limit': 1
+            }
+            params['q'] = location
+            response = osmnx.downloader.nominatim_request(params=params, request_type='search')
+            
+            if not response:
                 raise ValueError(f"Could not find location: {location}")
             
-            # Ensure we have numeric coordinates
-            lat, lon = float(location_coords[0]), float(location_coords[1])
+            # Extract exact coordinates from the response
+            lat = float(response[0]['lat'])
+            lon = float(response[0]['lon'])
             logger.info(f"Found coordinates: lat={lat}, lon={lon}")
             
             # Create a point and buffer it using the provided buffer distance (already in degrees)
             point = shapely.geometry.Point(lon, lat)  # lon, lat order for Point
             polygon = point.buffer(buffer_dist)  # buffer_dist is already in degrees
+            
+            # Log the polygon details
+            logger.info(f"Created circular buffer with radius {buffer_dist} degrees around point ({lat}, {lon})")
+            logger.info(f"Buffer area: {polygon.area:.6f} square degrees")
+            logger.info(f"Buffer bounds: {polygon.bounds}")
 
             return polygon
         except Exception as e:
-            logger.error(f"Error geocoding location '{location}': {str(e)}")
+            logger.error(f"Error creating buffer for location '{location}': {str(e)}")
             raise
 
     def load_shapefile(self, filename):

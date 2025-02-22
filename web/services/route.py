@@ -66,15 +66,14 @@ class RouteService:
             
             # Only get polygon and add it if we don't have an existing instance
             if not existing_burbing:
-                polygon = burbing.data_loader.load_osm_data(location, select=1, buffer_dist=20)
-                if not polygon:
+                # Get the polygon from the burbing instance
+                polygon = burbing.region
+                if not polygon or polygon.is_empty:
                     progress_queue.put(json.dumps({
                         'type': 'progress',
-                        'message': 'Failed to get OSM polygon'
+                        'message': 'Failed to get polygon from burbing instance'
                     }))
-                    return None, "Failed to get OSM polygon"
-                
-                burbing.add_polygon(polygon, location)
+                    return None, "Failed to get polygon from burbing instance"
                 
                 # Validate polygon was added correctly
                 if not hasattr(burbing, 'polygons') or not burbing.polygons:

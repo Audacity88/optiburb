@@ -14,6 +14,7 @@ import gpxpy
 from optiburb import Burbing
 import datetime
 from optiburb import Burbing
+import shapely.geometry
 
 routes = Blueprint('routes', __name__)
 
@@ -52,6 +53,7 @@ def generate_route():
         data = request.get_json()
         location = data.get('location')
         start_point = data.get('start_point')
+        center_coordinates = data.get('center_coordinates')
         session_id = data.get('session_id')
         
         # Create progress queue for this session
@@ -79,13 +81,23 @@ def generate_route():
         
         # Only get polygon and add it if we don't have an existing instance
         if not existing_burbing:
-            polygon = burbing.data_loader.load_osm_data(location, select=1, buffer_dist=buffer_degrees)
+            # Create a point from the center coordinates and buffer it
+            if not center_coordinates:
+                progress_queue.put(json.dumps({
+                    'type': 'error',
+                    'message': 'Center coordinates are required'
+                }))
+                return jsonify({'error': 'Center coordinates are required'}), 400
+                
+            point = shapely.geometry.Point(center_coordinates[1], center_coordinates[0])  # lon, lat order
+            polygon = point.buffer(buffer_degrees)
+            
             if not polygon:
                 progress_queue.put(json.dumps({
                     'type': 'progress',
-                    'message': 'Failed to get OSM polygon'
+                    'message': 'Failed to create buffer polygon'
                 }))
-                return None, "Failed to get OSM polygon"
+                return jsonify({'error': 'Failed to create buffer polygon'}), 400
             
             burbing.add_polygon(polygon, location)
             
@@ -95,7 +107,7 @@ def generate_route():
                     'type': 'progress',
                     'message': 'Failed to initialize area polygon'
                 }))
-                return None, "Failed to initialize polygons"
+                return jsonify({'error': 'Failed to initialize polygons'}), 400
             
             # Get the center coordinates of the polygon
             center_lat, center_lng = polygon.centroid.y, polygon.centroid.x
@@ -111,6 +123,17 @@ def generate_route():
         # Get bounds from the polygon
         minx, miny, maxx, maxy = polygon.bounds
         logger.info(f"Area bounds: minLat={miny}, maxLat={maxy}, minLng={minx}, maxLng={maxx}")
+
+        # Set start location if provided
+        if start_point:
+            try:
+                burbing.set_start_location(start_point)
+            except ValueError as e:
+                progress_queue.put(json.dumps({
+                    'type': 'error',
+                    'message': str(e)
+                }))
+                return jsonify({'error': str(e)}), 400
 
         # Check for Strava authentication and get completed area if needed
         completed_area = None

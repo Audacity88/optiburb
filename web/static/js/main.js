@@ -732,15 +732,28 @@ document.addEventListener('DOMContentLoaded', function() {
     async function searchLocation(query) {
         try {
             const baseUrl = 'https://nominatim.openstreetmap.org/search';
+            let searchQuery = query;
+            
+            // If the query doesn't include a city/state, append Austin, TX
+            if (!query.toLowerCase().includes('austin') && !query.toLowerCase().includes('tx')) {
+                // Add "street" if it looks like a street address but doesn't include it
+                if (/^\d+\s+[^,]+$/.test(query.trim())) {
+                    searchQuery = `${query} street`;
+                }
+                // Append Austin, TX to the search query
+                searchQuery = `${searchQuery}, Austin, TX`;
+            }
+            
             const params = new URLSearchParams({
                 format: 'json',
-                q: query,
-                limit: 1,
+                q: searchQuery,
+                limit: 5,  // Get more results to find better matches
                 addressdetails: 1,
                 countrycodes: 'us',
                 'accept-language': 'en'
             });
 
+            console.log('Searching for location:', searchQuery);  // Debug log
             const response = await fetch(`${baseUrl}?${params}`, {
                 headers: {
                     'User-Agent': 'OptiburB Route Generator v1.0'
@@ -752,7 +765,21 @@ document.addEventListener('DOMContentLoaded', function() {
             }
 
             const results = await response.json();
-            return results[0] || null; // Return first result or null
+            console.log('Search results:', results);  // Debug log
+            
+            if (!results.length) {
+                return null;
+            }
+
+            // Try to find a result in Austin, TX
+            const austinMatch = results.find(result => {
+                const address = result.address || {};
+                const city = (address.city || '').toLowerCase();
+                const state = (address.state || '').toLowerCase();
+                return city === 'austin' && (state === 'texas' || state === 'tx');
+            });
+
+            return austinMatch || results[0];  // Return Austin match if found, otherwise first result
         } catch (error) {
             console.error('Error in searchLocation:', error);
             return null;
@@ -824,20 +851,11 @@ document.addEventListener('DOMContentLoaded', function() {
         console.log('Starting route generation with session:', sessionId);
 
         try {
-            // Get form data
-            const location = locationInput.value.trim();
-            const startPoint = startPointInput.value.trim();
-            
-            // Validate inputs
-            if (!location) {
-                throw new Error('Please enter a location');
-            }
-
             // Initialize formData first
             const formData = {
-                location: location,
+                location: null,  // No default location
+                center_coordinates: null,  // No default coordinates
                 start_point: null,
-                start_coordinates: null,
                 simplify: document.querySelector('input[name="simplify"]').checked,
                 prune: document.querySelector('input[name="prune"]').checked,
                 simplify_gpx: document.querySelector('input[name="simplifyGpx"]').checked,
@@ -846,21 +864,44 @@ document.addEventListener('DOMContentLoaded', function() {
                 session_id: sessionId
             };
 
-            // If start point is provided, validate it and update formData
-            let startLocation = null;
+            // Get the city input
+            const cityInput = document.getElementById('city').value.trim();
+            if (!cityInput) {
+                throw new Error('Please enter a city');
+            }
+
+            // Search for the city first
+            const cityLocation = await searchLocation(cityInput);
+            if (!cityLocation) {
+                throw new Error('Could not find the specified city');
+            }
+
+            // Get the start point location if provided
+            const startPoint = startPointInput.value.trim();
             if (startPoint) {
-                startLocation = await searchLocation(startPoint);
+                // Search for the start point location
+                const startLocation = await searchLocation(startPoint);
                 if (!startLocation) {
                     throw new Error('Could not find the specified start point');
                 }
-                // Update formData with start location info and use it as the center location
-                formData.start_point = startLocation.display_name;
-                formData.start_coordinates = [
+
+                // Use the start point coordinates for both center and start location
+                const coordinates = [
                     parseFloat(startLocation.lat),
                     parseFloat(startLocation.lon)
                 ];
-                // Use the start point as the location center instead of the original location
-                formData.location = startLocation.display_name;
+                formData.center_coordinates = coordinates;  // Use start point as center
+                formData.start_point = startLocation.display_name;
+                formData.start_coordinates = coordinates;
+                formData.location = cityLocation.display_name;  // Keep city name for context
+            } else {
+                // If no start point, use city coordinates as center
+                const cityCoordinates = [
+                    parseFloat(cityLocation.lat),
+                    parseFloat(cityLocation.lon)
+                ];
+                formData.center_coordinates = cityCoordinates;
+                formData.location = cityLocation.display_name;
             }
             
             console.log('Form data:', formData);

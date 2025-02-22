@@ -57,10 +57,50 @@ class Burbing:
         processed_name = self.data_loader.process_name(name)
         self.name += processed_name
 
-    def set_start_location(self, addr):
-        """Store the starting location address for later use."""
-        self.start_addr = addr
-        logger.info('Stored start address: %s', addr)
+    def _validate_city_match(self, location_components, target_city_components):
+        """
+        Validate that a location is in the target city by comparing address components.
+        
+        Args:
+            location_components (dict): Address components of the location to validate
+            target_city_components (dict): Address components of the target city
+            
+        Returns:
+            bool: True if the location is in the target city, False otherwise
+        """
+        try:
+            # Get city and state from both addresses
+            loc_city = location_components.get('city', '').lower()
+            loc_state = location_components.get('state', '').lower()
+            target_city = target_city_components.get('city', '').lower()
+            target_state = target_city_components.get('state', '').lower()
+            
+            # Check if city and state match
+            return loc_city == target_city and loc_state == target_state
+        except Exception as e:
+            logger.error(f"Error validating city match: {str(e)}")
+            return False
+
+    def set_start_location(self, addr, target_city=None):
+        """
+        Store the starting location address for later use.
+        
+        Args:
+            addr (str): The address to set as start location
+            target_city (str): Deprecated parameter, kept for backward compatibility
+        """
+        try:
+            # Geocode the address to get coordinates
+            start_coords = osmnx.geocode(addr)
+            if start_coords is None:
+                raise ValueError(f"Could not find location: {addr}")
+
+            # Store the start address and log it
+            self.start_addr = addr
+            logger.info('Stored start address: %s (coordinates: %s)', addr, start_coords)
+        except Exception as e:
+            logger.error(f"Error setting start location: {str(e)}")
+            raise ValueError(f"Invalid start location: {str(e)}")
 
     def _set_start_node(self):
         """Set the start node after the graph is loaded."""
@@ -68,7 +108,7 @@ class Burbing:
             return
         
         try:
-            # First geocode the address to get coordinates
+            # We already validated the coordinates in set_start_location, so just get them again
             coords = osmnx.geocode(self.start_addr)
             if coords is None:
                 raise ValueError(f"Could not find location: {self.start_addr}")
@@ -131,17 +171,16 @@ class Burbing:
 
 def main():
     parser = argparse.ArgumentParser(description='Optimum Suburb Route Generator')
-    parser.add_argument('location', type=str, help='location name (e.g. "West Hartford, CT")')
+    parser.add_argument('center', type=str, help='address to center the route area on')
     parser.add_argument('--debug', type=str, default='info', help='debug level debug, info, warn, etc')
     parser.add_argument('--log-file', type=str, help='file to write logs to')
-    parser.add_argument('--start', type=str, help='optional starting address')
     parser.add_argument('--prune', default=False, action='store_true', help='prune unnamed gravel tracks')
     parser.add_argument('--simplify', default=False, action='store_true', help='simplify OSM nodes on load')
     parser.add_argument('--simplify-gpx', dest='simplify_gpx', default=True, action='store_true', help='reduce GPX points')
     parser.add_argument('--complex-gpx', dest='simplify_gpx', action='store_false', help='leave all the OSM points in the GPX output')
     parser.add_argument('--select', type=int, default=1, help='select the nth item from the search results')
     parser.add_argument('--shapefile', type=str, default=None, help='filename of shapefile to load localities, comma separated by the column to match on')
-    parser.add_argument('--buffer', type=int, dest='buffer', default=500, help='buffer distance in meters around polygon')
+    parser.add_argument('--buffer', type=int, dest='buffer', default=500, help='buffer distance in meters around center point')
     parser.add_argument('--save-fig', default=False, action='store_true', help='save an SVG image of the nodes and edges')
     parser.add_argument('--completed-roads', type=str, help='GPX file containing completed roads to exclude')
 
@@ -173,14 +212,14 @@ def main():
     if args.shapefile:
         filename, key = args.shapefile.split(',')
         shapefile = burbing.data_loader.load_shapefile(filename)
-        polygon = burbing.data_loader.get_shapefile_polygon(shapefile, key, args.location)
-        burbing.add_polygon(polygon, args.location)
+        polygon = burbing.data_loader.get_shapefile_polygon(shapefile, key, args.center)
+        burbing.add_polygon(polygon, args.center)
     else:
-        polygon = burbing.data_loader.load_osm_data(args.location, args.select, buffer_degrees)
-        burbing.add_polygon(polygon, args.location)
-
-    if args.start:
-        burbing.set_start_location(args.start)
+        # Create a circular buffer around the center point
+        polygon = burbing.data_loader.load_osm_data(args.center, args.select, buffer_degrees)
+        burbing.add_polygon(polygon, args.center)
+        # Set the center point as the start location
+        burbing.set_start_location(args.center)
 
     # Load completed roads if specified
     if args.completed_roads:
