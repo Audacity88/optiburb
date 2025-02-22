@@ -292,6 +292,31 @@ class GraphBalancer:
         """
         logger.info('Processing directed graph for balancing')
         
+        # Validate input graph
+        if not isinstance(graph, nx.DiGraph):
+            raise ValueError("Input must be a directed graph (nx.DiGraph)")
+        
+        if graph.number_of_nodes() == 0:
+            raise ValueError("Input graph has no nodes")
+            
+        if not node_coords:
+            raise ValueError("Node coordinates dictionary is empty")
+            
+        # Log initial graph state
+        logger.info(f"Initial graph state:")
+        logger.info(f"  - Number of nodes: {graph.number_of_nodes()}")
+        logger.info(f"  - Number of edges: {graph.number_of_edges()}")
+        
+        # Verify all nodes have coordinates
+        missing_coords = []
+        for node in graph.nodes():
+            if node not in node_coords:
+                missing_coords.append(node)
+        if missing_coords:
+            logger.error(f"Found {len(missing_coords)} nodes without coordinates")
+            logger.error(f"First few missing nodes: {missing_coords[:5]}")
+            raise ValueError(f"Found {len(missing_coords)} nodes without coordinates")
+        
         # First ensure the graph is connected
         working_graph = self._ensure_connectivity(graph, node_coords)
         
@@ -350,6 +375,13 @@ class GraphBalancer:
 
         logger.info(f"Nodes needing incoming edges: {len(needs_incoming)}")
         logger.info(f"Nodes needing outgoing edges: {len(needs_outgoing)}")
+        
+        # Verify total imbalance matches
+        total_incoming_needed = sum(needed for _, needed in needs_incoming)
+        total_outgoing_needed = sum(needed for _, needed in needs_outgoing)
+        if total_incoming_needed != total_outgoing_needed:
+            logger.error(f"Total imbalance mismatch: {total_incoming_needed} incoming vs {total_outgoing_needed} outgoing")
+            raise ValueError("Total edge imbalance does not match between incoming and outgoing needs")
 
         edges_added = 0
         straight_lines_added = 0
@@ -466,6 +498,23 @@ class GraphBalancer:
         logger.info(f"After balancing: {working_graph.number_of_edges()} total edges, {edges_with_geom_after} with geometry")
         logger.info(f"Added {edges_added} balancing edges in {iteration} iterations")
         logger.info(f"Final graph state: added {final_straight_lines - straight_lines} new straight line edges")
+        
+        # Final validation
+        final_unbalanced = []
+        for node in working_graph.nodes():
+            in_degree = working_graph.in_degree(node)
+            out_degree = working_graph.out_degree(node)
+            if in_degree != out_degree:
+                final_unbalanced.append((node, in_degree, out_degree))
+                logger.error(f"Node {node} remains unbalanced: in={in_degree}, out={out_degree}")
+        
+        if final_unbalanced:
+            raise ValueError(f"Graph remains unbalanced after processing. Found {len(final_unbalanced)} unbalanced nodes.")
+            
+        # Verify graph is still connected
+        if not nx.is_weakly_connected(working_graph):
+            components = list(nx.weakly_connected_components(working_graph))
+            raise ValueError(f"Graph became disconnected during balancing. Found {len(components)} components.")
         
         return working_graph
 

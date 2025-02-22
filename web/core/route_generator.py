@@ -372,6 +372,8 @@ class RouteGenerator:
         """
         logger.info('Starting to find Eulerian circuit in directed graph')
         
+        original_start = start_node  # Store the original start node
+        
         # Filter out completed roads if requested
         if completed_area is not None:
             graph = self.filter_completed_roads(graph, completed_area)
@@ -388,8 +390,50 @@ class RouteGenerator:
         
         logger.info(f"Input graph has {initial_straight_lines} straight line edges")
         
-        # If no start node specified, use any node
-        if start_node is None:
+        # Verify the graph has nodes
+        if graph.number_of_nodes() == 0:
+            raise ValueError("Graph has no nodes")
+            
+        # Handle start node selection
+        if start_node is not None and start_node not in graph.nodes():
+            logger.warning(f"Original start node {start_node} not found in filtered graph")
+            logger.info(f"Available nodes: {list(graph.nodes())[:10]}...")
+            
+            # Try to find the closest available node to the original start
+            if hasattr(graph, 'nodes') and all('x' in graph.nodes[n] and 'y' in graph.nodes[n] for n in graph.nodes()):
+                # Get coordinates of all nodes
+                closest_node = None
+                min_distance = float('inf')
+                start_coords = None
+                
+                # Try to get coordinates of original start node from the graph attributes
+                for node in graph.nodes():
+                    if hasattr(graph.nodes[node], 'original_id') and graph.nodes[node]['original_id'] == original_start:
+                        start_coords = (graph.nodes[node]['x'], graph.nodes[node]['y'])
+                        break
+                
+                if start_coords:
+                    # Find closest node by Euclidean distance
+                    for node in graph.nodes():
+                        node_coords = (graph.nodes[node]['x'], graph.nodes[node]['y'])
+                        dist = ((node_coords[0] - start_coords[0])**2 + (node_coords[1] - start_coords[1])**2)**0.5
+                        if dist < min_distance:
+                            min_distance = dist
+                            closest_node = node
+                    
+                    if closest_node is not None:
+                        start_node = closest_node
+                        logger.info(f"Using closest available node {start_node} as start point")
+                    else:
+                        start_node = list(graph.nodes())[0]
+                        logger.info(f"Using first available node {start_node} as start point")
+                else:
+                    start_node = list(graph.nodes())[0]
+                    logger.info(f"Using first available node {start_node} as start point")
+            else:
+                start_node = list(graph.nodes())[0]
+                logger.info(f"Using first available node {start_node} as start point")
+        elif start_node is None:
             start_node = list(graph.nodes())[0]
             logger.info(f"Using node {start_node} as start point")
         
@@ -409,6 +453,14 @@ class RouteGenerator:
         if not nx.is_weakly_connected(graph):
             components = list(nx.weakly_connected_components(graph))
             raise ValueError(f"Graph is not connected. Found {len(components)} weakly connected components.")
+        
+        # Log graph state before finding circuit
+        logger.info(f"Graph state before finding circuit:")
+        logger.info(f"  - Number of nodes: {graph.number_of_nodes()}")
+        logger.info(f"  - Number of edges: {graph.number_of_edges()}")
+        logger.info(f"  - Start node: {start_node}")
+        logger.info(f"  - Start node in-degree: {graph.in_degree(start_node)}")
+        logger.info(f"  - Start node out-degree: {graph.out_degree(start_node)}")
         
         # Find Eulerian circuit
         try:
