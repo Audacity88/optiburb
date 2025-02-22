@@ -15,6 +15,7 @@ from optiburb import Burbing
 import datetime
 from optiburb import Burbing
 import shapely.geometry
+from web.services.route_analysis import RouteAnalysisService
 
 routes = Blueprint('routes', __name__)
 
@@ -192,6 +193,10 @@ def generate_route():
         if error:
             return jsonify({'error': error}), 500
 
+        # Generate AI summary
+        strava_token = session.get('strava_token', {}).get('access_token') if 'strava_token' in session else None
+        route_summary = RouteAnalysisService.analyze_route(gpx_filename, strava_token)
+
         progress_queue.put(json.dumps({
             'type': 'progress',
             'step': 'Route generation complete',
@@ -202,7 +207,8 @@ def generate_route():
         return jsonify({
             'success': True,
             'message': 'Route generated successfully',
-            'gpx_file': gpx_filename
+            'gpx_file': gpx_filename,
+            'summary': route_summary
         })
         
     except Exception as e:
@@ -526,5 +532,31 @@ def upload_gpx():
         
     except Exception as e:
         logger.error(f"Error processing uploaded GPX: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@routes.route('/route/<filename>/summary')
+@login_required
+def get_route_summary(filename):
+    """Get AI summary for an existing route."""
+    try:
+        # Verify file exists
+        if not os.path.exists(os.path.join(settings.UPLOAD_FOLDER, filename)):
+            return jsonify({'error': 'Route file not found'}), 404
+
+        # Get Strava token if available
+        strava_token = session.get('strava_token', {}).get('access_token') if 'strava_token' in session else None
+        
+        # Generate summary
+        route_summary = RouteAnalysisService.analyze_route(filename, strava_token)
+        if not route_summary:
+            return jsonify({'error': 'Failed to generate route summary'}), 500
+
+        return jsonify({
+            'success': True,
+            'summary': route_summary
+        })
+
+    except Exception as e:
+        logger.error(f"Error getting route summary: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
