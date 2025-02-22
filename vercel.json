@@ -7,17 +7,18 @@
             "config": {
                 "maxLambdaSize": "15mb",
                 "runtime": "python3.9",
-                "installCommand": "apt-get update && apt-get install -y libgeos-dev && pip install -r requirements.txt"
+                "installCommand": "yum install -y geos geos-devel && pip install --no-cache-dir -r requirements.txt"
             }
         }
     ],
     "routes": [
         {
             "src": "/(.*)",
-            "dest": "/"
+            "dest": "/web/app.py"
         }
     ],
     "env": {
-        "PYTHONPATH": "."
+        "PYTHONPATH": ".",
+        "LD_LIBRARY_PATH": "/var/task/lib"
     }
 } 
